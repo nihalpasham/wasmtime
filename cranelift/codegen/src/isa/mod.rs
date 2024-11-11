@@ -69,6 +69,9 @@ pub mod x64;
 #[cfg(feature = "arm64")]
 pub mod aarch64;
 
+#[cfg(feature = "riscv32")]
+pub mod riscv32;
+
 #[cfg(feature = "riscv64")]
 pub mod riscv64;
 
@@ -111,6 +114,7 @@ pub fn lookup(triple: Triple) -> Result<Builder, LookupError> {
         }
         Architecture::Aarch64 { .. } => isa_builder!(aarch64, (feature = "arm64"), triple),
         Architecture::S390x { .. } => isa_builder!(s390x, (feature = "s390x"), triple),
+        Architecture::Riscv32 { .. } => isa_builder!(riscv32, (feature = "riscv32"), triple),
         Architecture::Riscv64 { .. } => isa_builder!(riscv64, (feature = "riscv64"), triple),
         Architecture::Pulley32 => isa_builder!(pulley32, (feature = "pulley"), triple),
         Architecture::Pulley64 => isa_builder!(pulley64, (feature = "pulley"), triple),
@@ -121,7 +125,7 @@ pub fn lookup(triple: Triple) -> Result<Builder, LookupError> {
 /// The string names of all the supported, but possibly not enabled, architectures. The elements of
 /// this slice are suitable to be passed to the [lookup_by_name] function to obtain the default
 /// configuration for that architecture.
-pub const ALL_ARCHITECTURES: &[&str] = &["x86_64", "aarch64", "s390x", "riscv64"];
+pub const ALL_ARCHITECTURES: &[&str] = &["x86_64", "aarch64", "s390x", "riscv32", "riscv64"];
 
 /// Look for a supported ISA with the given `name`.
 /// Return a builder that can create a corresponding `TargetIsa`.

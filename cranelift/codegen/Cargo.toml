@@ -85,6 +85,7 @@ unwind = ["gimli"]
 x86 = []
 arm64 = []
 s390x = []
+riscv32 = []
 riscv64 = []
 pulley = ["dep:pulley-interpreter", "pulley-interpreter/encode", "pulley-interpreter/disas"]
 # Enable the ISA target for the host machine
@@ -102,6 +103,7 @@ all-native-arch = [
     "x86",
     "arm64",
     "s390x",
+    "riscv32",
     "riscv64",
 ]
 

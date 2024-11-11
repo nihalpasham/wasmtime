@@ -47,6 +47,8 @@ fn main() {
         })
         .collect::<Vec<_>>();
 
+    isas.iter().for_each(|isa| println!("isas: {}", isa));
+
     // Don't require host isa if under 'all-arch' feature.
     let host_isa = env::var("CARGO_FEATURE_HOST_ARCH").is_ok() && !all_native_arch;
 

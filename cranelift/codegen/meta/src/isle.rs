@@ -72,6 +72,7 @@ pub fn get_isle_compilations(
     let src_isa_x64 = codegen_crate_dir.join("src").join("isa").join("x64");
     let src_isa_aarch64 = codegen_crate_dir.join("src").join("isa").join("aarch64");
     let src_isa_s390x = codegen_crate_dir.join("src").join("isa").join("s390x");
+    let src_isa_rv32 = codegen_crate_dir.join("src").join("isa").join("riscv32");
     let src_isa_risc_v = codegen_crate_dir.join("src").join("isa").join("riscv64");
     let src_isa_pulley_shared = codegen_crate_dir
         .join("src")
@@ -149,6 +150,19 @@ pub fn get_isle_compilations(
                     prelude_lower_isle.clone(),
                     src_isa_s390x.join("inst.isle"),
                     src_isa_s390x.join("lower.isle"),
+                ],
+                untracked_inputs: vec![clif_lower_isle.clone()],
+            },
+            // The rv32 instruction selector.
+            IsleCompilation {
+                name: "riscv32".to_string(),
+                output: gen_dir.join("isle_riscv32.rs"),
+                inputs: vec![
+                    prelude_isle.clone(),
+                    prelude_lower_isle.clone(),
+                    src_isa_rv32.join("inst.isle"),
+                    // src_isa_risc_v.join("inst_vector.isle"),
+                    // src_isa_risc_v.join("lower.isle"),
                 ],
                 untracked_inputs: vec![clif_lower_isle.clone()],
             },

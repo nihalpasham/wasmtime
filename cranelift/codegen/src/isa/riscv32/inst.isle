@@ -1,0 +1,373 @@
+;; Instruction formats.
+(type MInst
+  (enum
+    ;; A no-op of zero size.
+    (Nop0)
+    (Nop4)
+
+    ;; load immediate
+    (Lui
+      (rd WritableReg)
+      (imm Imm20))
+
+     (Auipc
+      (rd WritableReg)
+      (imm Imm20))
+    
+    ;; The LoadInlineConst operation represents the action of loading an immediate constant 
+    ;; (a constant value) directly into a register. This operation is often used when you 
+    ;; need to set a register to a specific constant value, such as zero, one, or any other 
+    ;; immediate value, without needing to calculate it or load it from memory.
+    (LoadInlineConst
+      (rd WritableReg)
+      (ty Type)
+      (imm u64))
+    
+    (AluRRR
+      (alu_op AluOPRRR)
+      (rd WritableReg)
+      (rs1 Reg)
+      (rs2 Reg))
+
+    ;; I-type Layout:
+    ;; 0-------6-7-------11-12------14-15------19-20------------------31
+    ;; | Opcode |   rd     |  width   |   rs1    |     Offset[11:0]    |
+
+    ;; The I-type Instruction Format i.e. uses one source register, one immediate and a destination register.
+    (AluRRImm12
+      (alu_op AluOPRRI)
+      (rd WritableReg)
+      (rs Reg)
+      (imm12 Imm12))
+
+    ;; Uses the I-type Instruction Format. In non-immediate CSR instructions (CSRRW, CSRRS, CSRRC), rs1 is 
+    ;; used to specify the register with the value to write.
+    (CsrReg
+      (op CsrRegOP)
+      (rd WritableReg)
+      (rs Reg)
+      (csr CSR))
+
+    ;; Uses the I-type Instruction Format. In immediate CSR instructions (CSRRWI, CSRRSI, CSRRCI), rs1 is 
+    ;; replaced by a 5-bit immediate value.
+    (CsrImm
+      (op CsrImmOP)
+      (rd WritableReg)
+      (imm UImm5)
+      (csr CSR))
+
+    ;; Loads use the I-type Instruction Format.
+    ;; Each load instruction in RV32I takes two operands
+    ;; - A destination register (e.g., rd), where the data will be loaded.
+    ;; - A base register (e.g., rs1) and an immediate offset, which together specify the memory address 
+    ;; to load from.
+    (Load
+      (rd WritableReg)
+      (op LoadOP)
+      (flags MemFlags)
+      (from AMode))
+    
+    ;; Pesudo load instructions
+
+    ;; This operation loads the address of an external symbol (e.g., a function or global variable) 
+    ;; into a register. In RISC-V, external symbols are often handled using relocation tables and 
+    ;; require instructions like LUI to load the upper 20 bits of the address and ADDI to load the 
+    ;; lower 12 bits.
+    (LoadExtName
+      (rd WritableReg)
+      (name BoxExternalName)
+      (offset i64))
+
+    ;; This operation loads the address of a TLS (Thread-Local Storage) symbol into a register.
+    ;; In RISC-V, accessing TLS typically involves a mechanism using the TLS base register 
+    ;; (which stores the base address of the TLS area). The RISC-V instructions can then use 
+    ;; PC-relative addressing or specialized instructions to load TLS data.
+    (ElfTlsGetAddr
+      (rd WritableReg)
+      (name BoxExternalName))
+
+    ;; This operation loads an address (a memory address or pointer) into a register.
+    ;; RISC-V handles address calculation through instructions like add for register-based 
+    ;; addressing or addi for immediate-based addressing.
+    (LoadAddr
+      (rd WritableReg)
+      (mem AMode))
+    
+    ;; Uses the S-type Instruction Format.
+    ;; Each store instruction in RV32I takes two operands:
+    ;; - A source register (e.g., rs2), which holds the data to be stored.
+    ;; - A base register (e.g., rs1) and an immediate offset, which together specify the memory address where 
+    ;; the data will be stored.
+    (Store
+      (to AMode)
+      (op StoreOP)
+      (flags MemFlags)
+      (src Reg))
+    
+    ;; A pseudo-instruction that captures register arguments in vregs.
+    (Args
+      (args VecArgPair))
+
+    ;; A pseudo-instruction that moves vregs to return registers.
+    (Rets
+      (rets VecRetPair))
+
+    (Ret)
+
+    ;; A pseudo-instruction representing a register extension operation, typically used to modify the bit-width 
+    ;; of data in a register (e.g., from 8-bit to 16-bit or 32-bit) by either sign-extending or zero-extending it.
+    (Extend
+      (rd WritableReg)
+      (rn Reg)
+      (signed bool)
+      (from_bits u8)
+      (to_bits u8))
+
+    (Call (info BoxCallInfo))
+
+    ;; A machine indirect-call instruction.
+    (CallInd (info BoxCallIndInfo))
+
+    ;; A direct return-call macro instruction.
+    (ReturnCall (info BoxReturnCallInfo))
+
+    ;; An indirect return-call macro instruction.
+    (ReturnCallInd (info BoxReturnCallIndInfo))
+
+    ;; Emits a trap with the given trap code if the comparison succeeds
+    (TrapIf
+      (rs1 Reg)
+      (rs2 Reg)
+      (cc IntCC)
+      (trap_code TrapCode))
+    
+    ;; A pseudo-instruction for a conditional branch
+    (CondBr
+      (taken CondBrTarget)
+      (not_taken CondBrTarget)
+      (kind IntegerCompare))
+
+    (Jal
+      (label MachLabel))
+    
+    ;; A pseudo-instruction representing a `mov` instruction. These are encoded as OrR's (AluRRR form) but we
+    ;; keep them separate at the `Inst` level for better pretty-printing and faster `is_move()` logic.
+    (Mov
+      (rd WritableReg)
+      (rm Reg)
+      (ty Type))
+    
+
+    (Fence
+      (pred FenceReq)
+      (succ FenceReq))
+
+    (EBreak)
+
+    ;; Conditional select i.e. select x if condition is true or y if condition is false. 
+    (Select
+      (dst WritableValueRegs)
+      (condition IntegerCompare)
+      (x ValueRegs)
+      (y ValueRegs))
+
+    ;; A pseudo-instruction. This operation represents a branch table or jump table operation, where a 
+    ;; program can select one of several potential branch targets based on the value of an index 
+    ;; register. This is useful for implementing switch-case logic or other scenarios where a single
+    ;; control flow decision may have multiple possible outcomes.
+    (BrTable
+      (index Reg)
+      (tmp1 WritableReg)
+      (tmp2 WritableReg)
+      (targets VecMachLabel))
+
+    ;; An instruction guaranteed to always be undefined and to trigger an illegal instruction at
+    ;; runtime.
+    (Udf
+      (trap_code TrapCode))
+    
+    ;; A jump and link register operation
+    (Jalr
+      ;;Plain unconditional jumps (assembler pseudo-op J) are encoded as a JAL with rd=x0.
+      (rd WritableReg)
+      (base Reg)
+      (offset Imm12))
+
+    ;; An unwind pseudo-instruction.
+    (Unwind
+      (inst UnwindInst))
+
+    ;; A dummy pseudo-instruction, useful to keep a value alive.
+    (DummyUse
+      (reg Reg))
+    
+
+    (RawData (data VecU8))
+
+    ;; A pseudo-instruction to count the number of 1s in a register 
+    ;; i.e., "population count" or "Hamming weight" without the hardware popcnt instruction.
+    (Popcnt
+      (sum WritableReg)
+      (step WritableReg)
+      (tmp WritableReg)
+      (rs Reg)
+      (ty Type))
+
+    ;; A pseudo-instruction to count the number of leading or trailing zeros in `rs`
+    (Cltz
+      ;; leading or trailing.
+      (leading bool)
+      (sum WritableReg)
+      (step WritableReg)
+      (tmp WritableReg)
+      (rs Reg)
+      (ty Type))
+    
+    ;; A pseudo-instruction for a bit-reversal operation on an 8-bit value. 
+    (Brev8
+      (rs Reg)
+      (ty Type)
+      (step WritableReg)
+      (tmp WritableReg)
+      (tmp2 WritableReg)
+      (rd WritableReg))
+
+    ;; A pseudo-instruction for stack probing. 
+    ;;
+    ;; Allocating a large stack frame all at once can cause
+    ;; issues, especially if it crosses over memory guard pages, which can
+    ;; result in a segmentation fault or stack overflow.
+    ;;
+    ;; StackProbeLoop gradually allocates memory in smaller, safe increments
+    ;; to ensure that each memory page is accessed in sequence. This way,
+    ;; it prevents sudden large allocations from causing faults.
+    ;;
+    ;; Parameters:
+    ;; - `guard_size` (u32): The size of each incremental allocation, typically
+    ;;    matching the system's page size (e.g., 4KB).
+    ;; - `probe_count` (u32): The total number of incremental steps needed to
+    ;;    complete the allocation.
+    ;; - `tmp` (WritableReg): A temporary register used for calculations in the loop.
+    ;;
+    ;; Example:
+    ;; If you need 16KB of stack space and the `guard_size` is 4KB, StackProbeLoop
+    ;; will allocate 4KB at a time, making four sequential increments.
+    (StackProbeLoop
+      (guard_size u32)
+      (probe_count u32)
+      (tmp WritableReg))
+))
+
+;; RV32I base set R-type
+(type AluOPRRR (enum
+  (Add)
+  (Sub)
+  (Sll)
+  (Slt)
+  (SltU)
+  (Xor)
+  (Srl)
+  (Sra)
+  (Or)
+  (And)
+))
+
+;; RV32I base set I-type
+(type AluOPRRI (enum
+  (Addi)
+  (Slti)
+  (SltiU)
+  (Xori)
+  (Ori)
+  (Andi)
+  (Slli)
+  (Srli)
+  (Srai)
+))
+
+(type CsrRegOP (enum
+  ;; Atomic Read/Write CSR
+  (CsrRW)
+  ;; Atomic Read and Set Bits in CSR
+  (CsrRS)
+  ;; Atomic Read and Clear Bits in CSR
+  (CsrRC)
+))
+
+;; Enum of the known CSR registers
+(type CSR (enum
+  ;; Floating-Point Dynamic Rounding Mode
+  (Frm)
+))
+
+(type CsrImmOP (enum
+  ;; Atomic Read/Write CSR (Immediate Source)
+  (CsrRWI)
+  ;; Atomic Read and Set Bits in CSR (Immediate Source)
+  (CsrRSI)
+  ;; Atomic Read and Clear Bits in CSR (Immediate Source)
+  (CsrRCI)
+))
+
+(type LoadOP (enum
+  (Lb)
+  (Lh)
+  (Lw)
+  (Lbu)
+  (Lhu)
+))
+
+(type StoreOP (enum
+  (Sb)
+  (Sh)
+  (Sw)
+))
+
+
+(type Imm20 (primitive Imm20))
+(type Imm12 (primitive Imm12))
+(type UImm5 (primitive UImm5))
+(type AMode (primitive AMode))
+(type IntegerCompare (primitive IntegerCompare))
+(type BoxCallInfo (primitive BoxCallInfo))
+(type BoxCallIndInfo (primitive BoxCallIndInfo))
+(type BoxReturnCallInfo (primitive BoxReturnCallInfo))
+(type BoxReturnCallIndInfo (primitive BoxReturnCallIndInfo))
+(type FenceReq (primitive u8))
+(type CondBrTarget (primitive CondBrTarget))
+(type VecU8 (primitive VecU8))
+(type VecMachLabel extern (enum))
+
+;; These types are for testing - i.e. check if we have an working ISLE file 
+
+;; (type IntCC extern
+;;     (enum
+;;         Equal
+;;         NotEqual
+;;         SignedGreaterThan
+;;         SignedGreaterThanOrEqual
+;;         SignedLessThan
+;;         SignedLessThanOrEqual
+;;         UnsignedGreaterThan
+;;         UnsignedGreaterThanOrEqual
+;;         UnsignedLessThan
+;;         UnsignedLessThanOrEqual
+;;     )
+;; )
+;; 
+;; (type TrapCode extern
+;;     (enum
+;;         BAD_CONVERSION_TO_INTEGER
+;;         HEAP_OUT_OF_BOUNDS
+;;         INTEGER_DIVISION_BY_ZERO
+;;         INTEGER_OVERFLOW
+;;         STACK_OVERFLOW
+;;     )
+;; )
+
+
+;; (type WritableReg (primitive WritableReg))
+;; (type Reg (primitive Reg))
+;; (type MemFlags (primitive MemFlags))
+;; (type MachLabel (primitive MachLabel))
+;; (type UnwindInst (primitive UnwindInst))
