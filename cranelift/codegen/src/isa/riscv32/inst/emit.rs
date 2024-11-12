@@ -1,6 +1,6 @@
 //! RV32 ISA: binary code emission.
 
-use crate::ir::{self, LibCall, TrapCode};
+use crate::ir::{self, LibCall};
 use crate::isa::riscv32::inst::*;
 use cranelift_control::ControlPlane;
 
@@ -43,10 +43,6 @@ pub struct EmitState {
     /// optimized away at compiletime. See [cranelift_control].
     ctrl_plane: ControlPlane,
 
-    /// Vector State
-    /// Controls the current state of the vector unit at the emission point.
-    vstate: EmitVState,
-
     frame_layout: FrameLayout,
 }
 
@@ -64,7 +60,6 @@ impl MachInstEmitState<Inst> for EmitState {
         EmitState {
             user_stack_map: None,
             ctrl_plane,
-            vstate: EmitVState::Unknown,
             frame_layout: abi.frame_layout().clone(),
         }
     }
@@ -79,11 +74,6 @@ impl MachInstEmitState<Inst> for EmitState {
 
     fn take_ctrl_plane(self) -> ControlPlane {
         self.ctrl_plane
-    }
-
-    fn on_new_block(&mut self) {
-        // Reset the vector state.
-        self.vstate = EmitVState::Unknown;
     }
 
     fn frame_layout(&self) -> &FrameLayout {
@@ -127,81 +117,6 @@ impl Inst {
             imm12: Imm12::from_i16(-1),
         }
     }
-
-    /// Returns Some(VState) if this instruction is expecting a specific vector state
-    /// before emission.
-    fn expected_vstate(&self) -> Option<&VState> {
-        match self {
-            Inst::Nop0
-            | Inst::Nop4
-            | Inst::BrTable { .. }
-            | Inst::Auipc { .. }
-            | Inst::Fli { .. }
-            | Inst::Lui { .. }
-            | Inst::LoadInlineConst { .. }
-            | Inst::AluRRR { .. }
-            | Inst::FpuRRR { .. }
-            | Inst::AluRRImm12 { .. }
-            | Inst::CsrReg { .. }
-            | Inst::CsrImm { .. }
-            | Inst::Load { .. }
-            | Inst::Store { .. }
-            | Inst::Args { .. }
-            | Inst::Rets { .. }
-            | Inst::Ret { .. }
-            | Inst::Extend { .. }
-            | Inst::Call { .. }
-            | Inst::CallInd { .. }
-            | Inst::ReturnCall { .. }
-            | Inst::ReturnCallInd { .. }
-            | Inst::Jal { .. }
-            | Inst::CondBr { .. }
-            | Inst::LoadExtName { .. }
-            | Inst::ElfTlsGetAddr { .. }
-            | Inst::LoadAddr { .. }
-            | Inst::Mov { .. }
-            | Inst::MovFromPReg { .. }
-            | Inst::Fence { .. }
-            | Inst::EBreak
-            | Inst::Udf { .. }
-            | Inst::FpuRR { .. }
-            | Inst::FpuRRRR { .. }
-            | Inst::Jalr { .. }
-            | Inst::Atomic { .. }
-            | Inst::Select { .. }
-            | Inst::AtomicCas { .. }
-            | Inst::RawData { .. }
-            | Inst::AtomicStore { .. }
-            | Inst::AtomicLoad { .. }
-            | Inst::AtomicRmwLoop { .. }
-            | Inst::TrapIf { .. }
-            | Inst::Unwind { .. }
-            | Inst::DummyUse { .. }
-            | Inst::Popcnt { .. }
-            | Inst::Cltz { .. }
-            | Inst::Brev8 { .. }
-            | Inst::StackProbeLoop { .. } => None,
-
-            // VecSetState does not expect any vstate, rather it updates it.
-            Inst::VecSetState { .. } => None,
-
-            // `vmv` instructions copy a set of registers and ignore vstate.
-            Inst::VecAluRRImm5 { op: VecAluOpRRImm5::VmvrV, .. } => None,
-
-            Inst::VecAluRR { vstate, .. } |
-            Inst::VecAluRRR { vstate, .. } |
-            Inst::VecAluRRRR { vstate, .. } |
-            Inst::VecAluRImm5 { vstate, .. } |
-            Inst::VecAluRRImm5 { vstate, .. } |
-            Inst::VecAluRRRImm5 { vstate, .. } |
-            // TODO: Unit-stride loads and stores only need the AVL to be correct, not
-            // the full vtype. A future optimization could be to decouple these two when
-            // updating vstate. This would allow us to avoid emitting a VecSetState in
-            // some cases.
-            Inst::VecLoad { vstate, .. }
-            | Inst::VecStore { vstate, .. } => Some(vstate),
-        }
-    }
 }
 
 impl MachInstEmit for Inst {
@@ -209,18 +124,6 @@ impl MachInstEmit for Inst {
     type Info = EmitInfo;
 
     fn emit(&self, sink: &mut MachBuffer<Inst>, emit_info: &Self::Info, state: &mut EmitState) {
-        // Check if we need to update the vector state before emitting this instruction
-        if let Some(expected) = self.expected_vstate() {
-            if state.vstate != EmitVState::Known(*expected) {
-                // Update the vector state.
-                Inst::VecSetState {
-                    rd: writable_zero_reg(),
-                    vstate: *expected,
-                }
-                .emit(sink, emit_info, state);
-            }
-        }
-
         // N.B.: we *must* not exceed the "worst-case size" used to compute
         // where to insert islands, except when islands are explicitly triggered
         // (with an `EmitIsland`). We check this in debug builds. This is `mut`
@@ -229,11 +132,9 @@ impl MachInstEmit for Inst {
         let mut start_off = sink.cur_offset();
 
         // First try to emit this as a compressed instruction
-        let res = self.try_emit_compressed(sink, emit_info, state, &mut start_off);
-        if res.is_none() {
-            // If we can't lets emit it as a normal instruction
-            self.emit_uncompressed(sink, emit_info, state, &mut start_off);
-        }
+
+        // If we can't lets emit it as a normal instruction
+        self.emit_uncompressed(sink, emit_info, state, &mut start_off);
 
         // We exclude br_table and return call from these checks since they emit
         // their own islands, and thus are allowed to exceed the worst case size.
@@ -258,572 +159,6 @@ impl MachInstEmit for Inst {
 }
 
 impl Inst {
-    /// Tries to emit an instruction as compressed, if we can't return false.
-    fn try_emit_compressed(
-        &self,
-        sink: &mut MachBuffer<Inst>,
-        emit_info: &EmitInfo,
-        state: &mut EmitState,
-        start_off: &mut u32,
-    ) -> Option<()> {
-        let has_m = emit_info.isa_flags.has_m();
-        let has_zba = emit_info.isa_flags.has_zba();
-        let has_zbb = emit_info.isa_flags.has_zbb();
-        let has_zca = emit_info.isa_flags.has_zca();
-        let has_zcb = emit_info.isa_flags.has_zcb();
-        let has_zcd = emit_info.isa_flags.has_zcd();
-
-        // Currently all compressed extensions (Zcb, Zcd, Zcmp, Zcmt, etc..) require Zca
-        // to be enabled, so check it early.
-        if !has_zca {
-            return None;
-        }
-
-        fn reg_is_compressible(r: Reg) -> bool {
-            r.to_real_reg()
-                .map(|r| r.hw_enc() >= 8 && r.hw_enc() < 16)
-                .unwrap_or(false)
-        }
-
-        match *self {
-            // C.ADD
-            Inst::AluRRR {
-                alu_op: AluOPRRR::Add,
-                rd,
-                rs1,
-                rs2,
-            } if (rd.to_reg() == rs1 || rd.to_reg() == rs2)
-                && rs1 != zero_reg()
-                && rs2 != zero_reg() =>
-            {
-                // Technically `c.add rd, rs` expands to `add rd, rd, rs`, but we can
-                // also swap rs1 with rs2 and we get an equivalent instruction. i.e we
-                // can also compress `add rd, rs, rd` into `c.add rd, rs`.
-                let src = if rd.to_reg() == rs1 { rs2 } else { rs1 };
-
-                sink.put2(encode_cr_type(CrOp::CAdd, rd, src));
-            }
-
-            // C.MV
-            Inst::AluRRImm12 {
-                alu_op: AluOPRRI::Addi | AluOPRRI::Ori,
-                rd,
-                rs,
-                imm12,
-            } if rd.to_reg() != rs
-                && rd.to_reg() != zero_reg()
-                && rs != zero_reg()
-                && imm12.as_i16() == 0 =>
-            {
-                sink.put2(encode_cr_type(CrOp::CMv, rd, rs));
-            }
-
-            // CA Ops
-            Inst::AluRRR {
-                alu_op:
-                    alu_op @ (AluOPRRR::And
-                    | AluOPRRR::Or
-                    | AluOPRRR::Xor
-                    | AluOPRRR::Addw
-                    | AluOPRRR::Mul),
-                rd,
-                rs1,
-                rs2,
-            } if (rd.to_reg() == rs1 || rd.to_reg() == rs2)
-                && reg_is_compressible(rs1)
-                && reg_is_compressible(rs2) =>
-            {
-                let op = match alu_op {
-                    AluOPRRR::And => CaOp::CAnd,
-                    AluOPRRR::Or => CaOp::COr,
-                    AluOPRRR::Xor => CaOp::CXor,
-                    AluOPRRR::Addw => CaOp::CAddw,
-                    AluOPRRR::Mul if has_zcb && has_m => CaOp::CMul,
-                    _ => return None,
-                };
-                // The canonical expansion for these instruction has `rd == rs1`, but
-                // these are all commutative operations, so we can swap the operands.
-                let src = if rd.to_reg() == rs1 { rs2 } else { rs1 };
-
-                sink.put2(encode_ca_type(op, rd, src));
-            }
-
-            // The sub instructions are non commutative, so we can't swap the operands.
-            Inst::AluRRR {
-                alu_op: alu_op @ (AluOPRRR::Sub | AluOPRRR::Subw),
-                rd,
-                rs1,
-                rs2,
-            } if rd.to_reg() == rs1 && reg_is_compressible(rs1) && reg_is_compressible(rs2) => {
-                let op = match alu_op {
-                    AluOPRRR::Sub => CaOp::CSub,
-                    AluOPRRR::Subw => CaOp::CSubw,
-                    _ => return None,
-                };
-                sink.put2(encode_ca_type(op, rd, rs2));
-            }
-
-            // c.j
-            //
-            // We don't have a separate JAL as that is only available in RV32C
-            Inst::Jal { label } => {
-                sink.use_label_at_offset(*start_off, label, LabelUse::RVCJump);
-                sink.add_uncond_branch(*start_off, *start_off + 2, label);
-                sink.put2(encode_cj_type(CjOp::CJ, Imm12::ZERO));
-            }
-
-            // c.jr
-            Inst::Jalr { rd, base, offset }
-                if rd.to_reg() == zero_reg() && base != zero_reg() && offset.as_i16() == 0 =>
-            {
-                sink.put2(encode_cr2_type(CrOp::CJr, base));
-            }
-
-            // c.jalr
-            Inst::Jalr { rd, base, offset }
-                if rd.to_reg() == link_reg() && base != zero_reg() && offset.as_i16() == 0 =>
-            {
-                sink.put2(encode_cr2_type(CrOp::CJalr, base));
-            }
-
-            // c.ebreak
-            Inst::EBreak => {
-                sink.put2(encode_cr_type(
-                    CrOp::CEbreak,
-                    writable_zero_reg(),
-                    zero_reg(),
-                ));
-            }
-
-            // c.unimp
-            Inst::Udf { trap_code } => {
-                sink.add_trap(trap_code);
-                sink.put2(0x0000);
-            }
-            // c.addi16sp
-            //
-            // c.addi16sp shares the opcode with c.lui, but has a destination field of x2.
-            // c.addi16sp adds the non-zero sign-extended 6-bit immediate to the value in the stack pointer (sp=x2),
-            // where the immediate is scaled to represent multiples of 16 in the range (-512,496). c.addi16sp is used
-            // to adjust the stack pointer in procedure prologues and epilogues. It expands into addi x2, x2, nzimm. c.addi16sp
-            // is only valid when nzimm≠0; the code point with nzimm=0 is reserved.
-            Inst::AluRRImm12 {
-                alu_op: AluOPRRI::Addi,
-                rd,
-                rs,
-                imm12,
-            } if rd.to_reg() == rs
-                && rs == stack_reg()
-                && imm12.as_i16() != 0
-                && (imm12.as_i16() % 16) == 0
-                && Imm6::maybe_from_i16(imm12.as_i16() / 16).is_some() =>
-            {
-                let imm6 = Imm6::maybe_from_i16(imm12.as_i16() / 16).unwrap();
-                sink.put2(encode_c_addi16sp(imm6));
-            }
-
-            // c.addi4spn
-            //
-            // c.addi4spn is a CIW-format instruction that adds a zero-extended non-zero
-            // immediate, scaled by 4, to the stack pointer, x2, and writes the result to
-            // rd. This instruction is used to generate pointers to stack-allocated variables
-            // and expands to addi rd, x2, nzuimm. c.addi4spn is only valid when nzuimm≠0;
-            // the code points with nzuimm=0 are reserved.
-            Inst::AluRRImm12 {
-                alu_op: AluOPRRI::Addi,
-                rd,
-                rs,
-                imm12,
-            } if reg_is_compressible(rd.to_reg())
-                && rs == stack_reg()
-                && imm12.as_i16() != 0
-                && (imm12.as_i16() % 4) == 0
-                && u8::try_from(imm12.as_i16() / 4).is_ok() =>
-            {
-                let imm = u8::try_from(imm12.as_i16() / 4).unwrap();
-                sink.put2(encode_ciw_type(CiwOp::CAddi4spn, rd, imm));
-            }
-
-            // c.li
-            Inst::AluRRImm12 {
-                alu_op: AluOPRRI::Addi,
-                rd,
-                rs,
-                imm12,
-            } if rd.to_reg() != zero_reg() && rs == zero_reg() => {
-                let imm6 = Imm6::maybe_from_imm12(imm12)?;
-                sink.put2(encode_ci_type(CiOp::CLi, rd, imm6));
-            }
-
-            // c.addi
-            Inst::AluRRImm12 {
-                alu_op: AluOPRRI::Addi,
-                rd,
-                rs,
-                imm12,
-            } if rd.to_reg() == rs && rs != zero_reg() && imm12.as_i16() != 0 => {
-                let imm6 = Imm6::maybe_from_imm12(imm12)?;
-                sink.put2(encode_ci_type(CiOp::CAddi, rd, imm6));
-            }
-
-            // c.addiw
-            Inst::AluRRImm12 {
-                alu_op: AluOPRRI::Addiw,
-                rd,
-                rs,
-                imm12,
-            } if rd.to_reg() == rs && rs != zero_reg() => {
-                let imm6 = Imm6::maybe_from_imm12(imm12)?;
-                sink.put2(encode_ci_type(CiOp::CAddiw, rd, imm6));
-            }
-
-            // c.lui
-            //
-            // c.lui loads the non-zero 6-bit immediate field into bits 17–12
-            // of the destination register, clears the bottom 12 bits, and
-            // sign-extends bit 17 into all higher bits of the destination.
-            Inst::Lui { rd, imm: imm20 }
-                if rd.to_reg() != zero_reg()
-                    && rd.to_reg() != stack_reg()
-                    && imm20.as_i32() != 0 =>
-            {
-                // Check that the top bits are sign extended
-                let imm = imm20.as_i32() << 14 >> 14;
-                if imm != imm20.as_i32() {
-                    return None;
-                }
-                let imm6 = Imm6::maybe_from_i32(imm)?;
-                sink.put2(encode_ci_type(CiOp::CLui, rd, imm6));
-            }
-
-            // c.slli
-            Inst::AluRRImm12 {
-                alu_op: AluOPRRI::Slli,
-                rd,
-                rs,
-                imm12,
-            } if rd.to_reg() == rs && rs != zero_reg() && imm12.as_i16() != 0 => {
-                // The shift amount is unsigned, but we encode it as signed.
-                let shift = imm12.as_i16() & 0x3f;
-                let imm6 = Imm6::maybe_from_i16(shift << 10 >> 10).unwrap();
-                sink.put2(encode_ci_type(CiOp::CSlli, rd, imm6));
-            }
-
-            // c.srli / c.srai
-            Inst::AluRRImm12 {
-                alu_op: op @ (AluOPRRI::Srli | AluOPRRI::Srai),
-                rd,
-                rs,
-                imm12,
-            } if rd.to_reg() == rs && reg_is_compressible(rs) && imm12.as_i16() != 0 => {
-                let op = match op {
-                    AluOPRRI::Srli => CbOp::CSrli,
-                    AluOPRRI::Srai => CbOp::CSrai,
-                    _ => unreachable!(),
-                };
-
-                // The shift amount is unsigned, but we encode it as signed.
-                let shift = imm12.as_i16() & 0x3f;
-                let imm6 = Imm6::maybe_from_i16(shift << 10 >> 10).unwrap();
-                sink.put2(encode_cb_type(op, rd, imm6));
-            }
-
-            // c.zextb
-            //
-            // This is an alias for `andi rd, rd, 0xff`
-            Inst::AluRRImm12 {
-                alu_op: AluOPRRI::Andi,
-                rd,
-                rs,
-                imm12,
-            } if has_zcb
-                && rd.to_reg() == rs
-                && reg_is_compressible(rs)
-                && imm12.as_i16() == 0xff =>
-            {
-                sink.put2(encode_cszn_type(CsznOp::CZextb, rd));
-            }
-
-            // c.andi
-            Inst::AluRRImm12 {
-                alu_op: AluOPRRI::Andi,
-                rd,
-                rs,
-                imm12,
-            } if rd.to_reg() == rs && reg_is_compressible(rs) => {
-                let imm6 = Imm6::maybe_from_imm12(imm12)?;
-                sink.put2(encode_cb_type(CbOp::CAndi, rd, imm6));
-            }
-
-            // Stack Based Loads
-            Inst::Load {
-                rd,
-                op: op @ (LoadOP::Lw | LoadOP::Ld | LoadOP::Fld),
-                from,
-                flags,
-            } if from.get_base_register() == Some(stack_reg())
-                && (from.get_offset_with_state(state) % op.size()) == 0 =>
-            {
-                // We encode the offset in multiples of the load size.
-                let offset = from.get_offset_with_state(state);
-                let imm6 = u8::try_from(offset / op.size())
-                    .ok()
-                    .and_then(Uimm6::maybe_from_u8)?;
-
-                // Some additional constraints on these instructions.
-                //
-                // Integer loads are not allowed to target x0, but floating point loads
-                // are, since f0 is not a special register.
-                //
-                // Floating point loads are not included in the base Zca extension
-                // but in a separate Zcd extension. Both of these are part of the C Extension.
-                let rd_is_zero = rd.to_reg() == zero_reg();
-                let op = match op {
-                    LoadOP::Lw if !rd_is_zero => CiOp::CLwsp,
-                    LoadOP::Ld if !rd_is_zero => CiOp::CLdsp,
-                    LoadOP::Fld if has_zcd => CiOp::CFldsp,
-                    _ => return None,
-                };
-
-                if let Some(trap_code) = flags.trap_code() {
-                    // Register the offset at which the actual load instruction starts.
-                    sink.add_trap(trap_code);
-                }
-                sink.put2(encode_ci_sp_load(op, rd, imm6));
-            }
-
-            // Regular Loads
-            Inst::Load {
-                rd,
-                op:
-                    op
-                    @ (LoadOP::Lw | LoadOP::Ld | LoadOP::Fld | LoadOP::Lbu | LoadOP::Lhu | LoadOP::Lh),
-                from,
-                flags,
-            } if reg_is_compressible(rd.to_reg())
-                && from
-                    .get_base_register()
-                    .map(reg_is_compressible)
-                    .unwrap_or(false)
-                && (from.get_offset_with_state(state) % op.size()) == 0 =>
-            {
-                let base = from.get_base_register().unwrap();
-
-                // We encode the offset in multiples of the store size.
-                let offset = from.get_offset_with_state(state);
-                let offset = u8::try_from(offset / op.size()).ok()?;
-
-                // We mix two different formats here.
-                //
-                // c.lw / c.ld / c.fld instructions are available in the standard Zca
-                // extension using the CL format.
-                //
-                // c.lbu / c.lhu / c.lh are only available in the Zcb extension and
-                // are also encoded differently. Technically they each have a different
-                // format, but they are similar enough that we can group them.
-                let is_zcb_load = matches!(op, LoadOP::Lbu | LoadOP::Lhu | LoadOP::Lh);
-                let encoded = if is_zcb_load {
-                    if !has_zcb {
-                        return None;
-                    }
-
-                    let op = match op {
-                        LoadOP::Lbu => ZcbMemOp::CLbu,
-                        LoadOP::Lhu => ZcbMemOp::CLhu,
-                        LoadOP::Lh => ZcbMemOp::CLh,
-                        _ => unreachable!(),
-                    };
-
-                    // Byte stores & loads have 2 bits of immediate offset. Halfword stores
-                    // and loads only have 1 bit.
-                    let imm2 = Uimm2::maybe_from_u8(offset)?;
-                    if (offset & !((1 << op.imm_bits()) - 1)) != 0 {
-                        return None;
-                    }
-
-                    encode_zcbmem_load(op, rd, base, imm2)
-                } else {
-                    // Floating point loads are not included in the base Zca extension
-                    // but in a separate Zcd extension. Both of these are part of the C Extension.
-                    let op = match op {
-                        LoadOP::Lw => ClOp::CLw,
-                        LoadOP::Ld => ClOp::CLd,
-                        LoadOP::Fld if has_zcd => ClOp::CFld,
-                        _ => return None,
-                    };
-                    let imm5 = Uimm5::maybe_from_u8(offset)?;
-
-                    encode_cl_type(op, rd, base, imm5)
-                };
-
-                if let Some(trap_code) = flags.trap_code() {
-                    // Register the offset at which the actual load instruction starts.
-                    sink.add_trap(trap_code);
-                }
-                sink.put2(encoded);
-            }
-
-            // Stack Based Stores
-            Inst::Store {
-                src,
-                op: op @ (StoreOP::Sw | StoreOP::Sd | StoreOP::Fsd),
-                to,
-                flags,
-            } if to.get_base_register() == Some(stack_reg())
-                && (to.get_offset_with_state(state) % op.size()) == 0 =>
-            {
-                // We encode the offset in multiples of the store size.
-                let offset = to.get_offset_with_state(state);
-                let imm6 = u8::try_from(offset / op.size())
-                    .ok()
-                    .and_then(Uimm6::maybe_from_u8)?;
-
-                // Floating point stores are not included in the base Zca extension
-                // but in a separate Zcd extension. Both of these are part of the C Extension.
-                let op = match op {
-                    StoreOP::Sw => CssOp::CSwsp,
-                    StoreOP::Sd => CssOp::CSdsp,
-                    StoreOP::Fsd if has_zcd => CssOp::CFsdsp,
-                    _ => return None,
-                };
-
-                if let Some(trap_code) = flags.trap_code() {
-                    // Register the offset at which the actual load instruction starts.
-                    sink.add_trap(trap_code);
-                }
-                sink.put2(encode_css_type(op, src, imm6));
-            }
-
-            // Regular Stores
-            Inst::Store {
-                src,
-                op: op @ (StoreOP::Sw | StoreOP::Sd | StoreOP::Fsd | StoreOP::Sh | StoreOP::Sb),
-                to,
-                flags,
-            } if reg_is_compressible(src)
-                && to
-                    .get_base_register()
-                    .map(reg_is_compressible)
-                    .unwrap_or(false)
-                && (to.get_offset_with_state(state) % op.size()) == 0 =>
-            {
-                let base = to.get_base_register().unwrap();
-
-                // We encode the offset in multiples of the store size.
-                let offset = to.get_offset_with_state(state);
-                let offset = u8::try_from(offset / op.size()).ok()?;
-
-                // We mix two different formats here.
-                //
-                // c.sw / c.sd / c.fsd instructions are available in the standard Zca
-                // extension using the CL format.
-                //
-                // c.sb / c.sh are only available in the Zcb extension and are also
-                // encoded differently.
-                let is_zcb_store = matches!(op, StoreOP::Sh | StoreOP::Sb);
-                let encoded = if is_zcb_store {
-                    if !has_zcb {
-                        return None;
-                    }
-
-                    let op = match op {
-                        StoreOP::Sh => ZcbMemOp::CSh,
-                        StoreOP::Sb => ZcbMemOp::CSb,
-                        _ => unreachable!(),
-                    };
-
-                    // Byte stores & loads have 2 bits of immediate offset. Halfword stores
-                    // and loads only have 1 bit.
-                    let imm2 = Uimm2::maybe_from_u8(offset)?;
-                    if (offset & !((1 << op.imm_bits()) - 1)) != 0 {
-                        return None;
-                    }
-
-                    encode_zcbmem_store(op, src, base, imm2)
-                } else {
-                    // Floating point stores are not included in the base Zca extension
-                    // but in a separate Zcd extension. Both of these are part of the C Extension.
-                    let op = match op {
-                        StoreOP::Sw => CsOp::CSw,
-                        StoreOP::Sd => CsOp::CSd,
-                        StoreOP::Fsd if has_zcd => CsOp::CFsd,
-                        _ => return None,
-                    };
-                    let imm5 = Uimm5::maybe_from_u8(offset)?;
-
-                    encode_cs_type(op, src, base, imm5)
-                };
-
-                if let Some(trap_code) = flags.trap_code() {
-                    // Register the offset at which the actual load instruction starts.
-                    sink.add_trap(trap_code);
-                }
-                sink.put2(encoded);
-            }
-
-            // c.not
-            //
-            // This is an alias for `xori rd, rd, -1`
-            Inst::AluRRImm12 {
-                alu_op: AluOPRRI::Xori,
-                rd,
-                rs,
-                imm12,
-            } if has_zcb
-                && rd.to_reg() == rs
-                && reg_is_compressible(rs)
-                && imm12.as_i16() == -1 =>
-            {
-                sink.put2(encode_cszn_type(CsznOp::CNot, rd));
-            }
-
-            // c.sext.b / c.sext.h / c.zext.h
-            //
-            // These are all the extend instructions present in `Zcb`, they
-            // also require `Zbb` since they aren't available in the base ISA.
-            Inst::AluRRImm12 {
-                alu_op: alu_op @ (AluOPRRI::Sextb | AluOPRRI::Sexth | AluOPRRI::Zexth),
-                rd,
-                rs,
-                imm12,
-            } if has_zcb
-                && has_zbb
-                && rd.to_reg() == rs
-                && reg_is_compressible(rs)
-                && imm12.as_i16() == 0 =>
-            {
-                let op = match alu_op {
-                    AluOPRRI::Sextb => CsznOp::CSextb,
-                    AluOPRRI::Sexth => CsznOp::CSexth,
-                    AluOPRRI::Zexth => CsznOp::CZexth,
-                    _ => unreachable!(),
-                };
-                sink.put2(encode_cszn_type(op, rd));
-            }
-
-            // c.zext.w
-            //
-            // This is an alias for `add.uw rd, rd, zero`
-            Inst::AluRRR {
-                alu_op: AluOPRRR::Adduw,
-                rd,
-                rs1,
-                rs2,
-            } if has_zcb
-                && has_zba
-                && rd.to_reg() == rs1
-                && reg_is_compressible(rs1)
-                && rs2 == zero_reg() =>
-            {
-                sink.put2(encode_cszn_type(CsznOp::CZextw, rd));
-            }
-
-            _ => return None,
-        }
-
-        return Some(());
-    }
-
     fn emit_uncompressed(
         &self,
         sink: &mut MachBuffer<Inst>,
@@ -858,9 +193,7 @@ impl Inst {
                 let x: u32 = 0b0110111 | reg_to_gpr_num(rd.to_reg()) << 7 | (imm.bits() << 12);
                 sink.put4(x);
             }
-            &Inst::Fli { rd, ty, imm } => {
-                sink.put4(encode_fli(ty, imm, rd));
-            }
+
             &Inst::LoadInlineConst { rd, ty, imm } => {
                 let data = &imm.to_le_bytes()[..ty.bytes() as usize];
 
@@ -885,39 +218,7 @@ impl Inst {
 
                 sink.bind_label(label_end, &mut state.ctrl_plane);
             }
-            &Inst::FpuRR {
-                alu_op,
-                width,
-                frm,
-                rd,
-                rs,
-            } => {
-                if alu_op.is_convert_to_int() {
-                    sink.add_trap(TrapCode::BAD_CONVERSION_TO_INTEGER);
-                }
-                sink.put4(encode_fp_rr(alu_op, width, frm, rd, rs));
-            }
-            &Inst::FpuRRRR {
-                alu_op,
-                rd,
-                rs1,
-                rs2,
-                rs3,
-                frm,
-                width,
-            } => {
-                sink.put4(encode_fp_rrrr(alu_op, width, frm, rd, rs1, rs2, rs3));
-            }
-            &Inst::FpuRRR {
-                alu_op,
-                width,
-                frm,
-                rd,
-                rs1,
-                rs2,
-            } => {
-                sink.put4(encode_fp_rrr(alu_op, width, frm, rd, rs1, rs2));
-            }
+
             &Inst::Unwind { ref inst } => {
                 sink.add_unwind(inst.clone());
             }
@@ -1209,30 +510,10 @@ impl Inst {
                         rs: rm,
                         imm12: Imm12::ZERO,
                     },
-                    RegClass::Float => Inst::FpuRRR {
-                        alu_op: FpuOPRRR::Fsgnj,
-                        width: FpuOPWidth::try_from(ty).unwrap(),
-                        frm: FRM::RNE,
-                        rd: rd,
-                        rs1: rm,
-                        rs2: rm,
-                    },
-                    RegClass::Vector => Inst::VecAluRRImm5 {
-                        op: VecAluOpRRImm5::VmvrV,
-                        vd: rd,
-                        vs2: rm,
-                        // Imm 0 means copy 1 register.
-                        imm: Imm5::maybe_from_i8(0).unwrap(),
-                        mask: VecOpMasking::Disabled,
-                        // Vstate for this instruction is ignored.
-                        vstate: VState::from_type(ty),
-                    },
+                    RegClass::Float => unimplemented!(),
+                    RegClass::Vector => unimplemented!(),
                 }
                 .emit(sink, emit_info, state);
-            }
-
-            &Inst::MovFromPReg { rd, rm } => {
-                Inst::gen_move(rd, Reg::from(rm), I64).emit(sink, emit_info, state);
             }
 
             &Inst::BrTable {
@@ -1387,28 +668,6 @@ impl Inst {
                 // Mark it as such so that we don't needlessly emit additional islands.
                 *start_off = sink.cur_offset();
             }
-
-            &Inst::Atomic {
-                op,
-                rd,
-                addr,
-                src,
-                amo,
-            } => {
-                // TODO: get flags from original CLIF atomic instruction
-                let flags = MemFlags::new();
-                if let Some(trap_code) = flags.trap_code() {
-                    sink.add_trap(trap_code);
-                }
-                let x = op.op_code()
-                    | reg_to_gpr_num(rd.to_reg()) << 7
-                    | op.funct3() << 12
-                    | reg_to_gpr_num(addr) << 15
-                    | reg_to_gpr_num(src) << 20
-                    | op.funct7(amo) << 25;
-
-                sink.put4(x);
-            }
             &Inst::Fence { pred, succ } => {
                 let x = 0b0001111
                     | 0b00000 << 7
@@ -1439,7 +698,7 @@ impl Inst {
                         .emit(sink, emit_info, state);
                     }
                     (_, Some(rs), None) => {
-                        let mut insts = Inst::load_constant_u64(rd, offset as u64);
+                        let mut insts = Inst::load_constant_u32(rd, offset as u64);
                         insts.push(Inst::AluRRR {
                             alu_op: AluOPRRR::Add,
                             rd,
@@ -1564,303 +823,6 @@ impl Inst {
             &Inst::EBreak => {
                 sink.put4(0x00100073);
             }
-            &Inst::AtomicCas {
-                offset,
-                t0,
-                dst,
-                e,
-                addr,
-                v,
-                ty,
-            } => {
-                //     # addr holds address of memory location
-                //     # e holds expected value
-                //     # v holds desired value
-                //     # dst holds return value
-                // cas:
-                //     lr.w dst, (addr)       # Load original value.
-                //     bne dst, e, fail       # Doesn’t match, so fail.
-                //     sc.w t0, v, (addr)     # Try to update.
-                //     bnez t0 , cas          # if store not ok,retry.
-                // fail:
-                let fail_label = sink.get_label();
-                let cas_lebel = sink.get_label();
-                sink.bind_label(cas_lebel, &mut state.ctrl_plane);
-                Inst::Atomic {
-                    op: AtomicOP::load_op(ty),
-                    rd: dst,
-                    addr,
-                    src: zero_reg(),
-                    amo: AMO::SeqCst,
-                }
-                .emit(sink, emit_info, state);
-                if ty.bits() < 32 {
-                    AtomicOP::extract(dst, offset, dst.to_reg(), ty)
-                        .iter()
-                        .for_each(|i| i.emit(sink, emit_info, state));
-                } else if ty.bits() == 32 {
-                    Inst::Extend {
-                        rd: dst,
-                        rn: dst.to_reg(),
-                        signed: false,
-                        from_bits: 32,
-                        to_bits: 64,
-                    }
-                    .emit(sink, emit_info, state);
-                }
-                Inst::CondBr {
-                    taken: CondBrTarget::Label(fail_label),
-                    not_taken: CondBrTarget::Fallthrough,
-                    kind: IntegerCompare {
-                        kind: IntCC::NotEqual,
-                        rs1: e,
-                        rs2: dst.to_reg(),
-                    },
-                }
-                .emit(sink, emit_info, state);
-                let store_value = if ty.bits() < 32 {
-                    // reload value to t0.
-                    Inst::Atomic {
-                        op: AtomicOP::load_op(ty),
-                        rd: t0,
-                        addr,
-                        src: zero_reg(),
-                        amo: AMO::SeqCst,
-                    }
-                    .emit(sink, emit_info, state);
-                    // set reset part.
-                    AtomicOP::merge(t0, writable_spilltmp_reg(), offset, v, ty)
-                        .iter()
-                        .for_each(|i| i.emit(sink, emit_info, state));
-                    t0.to_reg()
-                } else {
-                    v
-                };
-                Inst::Atomic {
-                    op: AtomicOP::store_op(ty),
-                    rd: t0,
-                    addr,
-                    src: store_value,
-                    amo: AMO::SeqCst,
-                }
-                .emit(sink, emit_info, state);
-                // check is our value stored.
-                Inst::CondBr {
-                    taken: CondBrTarget::Label(cas_lebel),
-                    not_taken: CondBrTarget::Fallthrough,
-                    kind: IntegerCompare {
-                        kind: IntCC::NotEqual,
-                        rs1: t0.to_reg(),
-                        rs2: zero_reg(),
-                    },
-                }
-                .emit(sink, emit_info, state);
-                sink.bind_label(fail_label, &mut state.ctrl_plane);
-            }
-            &Inst::AtomicRmwLoop {
-                offset,
-                op,
-                dst,
-                ty,
-                p,
-                x,
-                t0,
-            } => {
-                let retry = sink.get_label();
-                sink.bind_label(retry, &mut state.ctrl_plane);
-                // load old value.
-                Inst::Atomic {
-                    op: AtomicOP::load_op(ty),
-                    rd: dst,
-                    addr: p,
-                    src: zero_reg(),
-                    amo: AMO::SeqCst,
-                }
-                .emit(sink, emit_info, state);
-                //
-
-                let store_value: Reg = match op {
-                    crate::ir::AtomicRmwOp::Add
-                    | crate::ir::AtomicRmwOp::Sub
-                    | crate::ir::AtomicRmwOp::And
-                    | crate::ir::AtomicRmwOp::Or
-                    | crate::ir::AtomicRmwOp::Xor => {
-                        AtomicOP::extract(dst, offset, dst.to_reg(), ty)
-                            .iter()
-                            .for_each(|i| i.emit(sink, emit_info, state));
-                        Inst::AluRRR {
-                            alu_op: match op {
-                                crate::ir::AtomicRmwOp::Add => AluOPRRR::Add,
-                                crate::ir::AtomicRmwOp::Sub => AluOPRRR::Sub,
-                                crate::ir::AtomicRmwOp::And => AluOPRRR::And,
-                                crate::ir::AtomicRmwOp::Or => AluOPRRR::Or,
-                                crate::ir::AtomicRmwOp::Xor => AluOPRRR::Xor,
-                                _ => unreachable!(),
-                            },
-                            rd: t0,
-                            rs1: dst.to_reg(),
-                            rs2: x,
-                        }
-                        .emit(sink, emit_info, state);
-                        Inst::Atomic {
-                            op: AtomicOP::load_op(ty),
-                            rd: writable_spilltmp_reg2(),
-                            addr: p,
-                            src: zero_reg(),
-                            amo: AMO::SeqCst,
-                        }
-                        .emit(sink, emit_info, state);
-                        AtomicOP::merge(
-                            writable_spilltmp_reg2(),
-                            writable_spilltmp_reg(),
-                            offset,
-                            t0.to_reg(),
-                            ty,
-                        )
-                        .iter()
-                        .for_each(|i| i.emit(sink, emit_info, state));
-                        spilltmp_reg2()
-                    }
-                    crate::ir::AtomicRmwOp::Nand => {
-                        if ty.bits() < 32 {
-                            AtomicOP::extract(dst, offset, dst.to_reg(), ty)
-                                .iter()
-                                .for_each(|i| i.emit(sink, emit_info, state));
-                        }
-                        Inst::AluRRR {
-                            alu_op: AluOPRRR::And,
-                            rd: t0,
-                            rs1: x,
-                            rs2: dst.to_reg(),
-                        }
-                        .emit(sink, emit_info, state);
-                        Inst::construct_bit_not(t0, t0.to_reg()).emit(sink, emit_info, state);
-                        if ty.bits() < 32 {
-                            Inst::Atomic {
-                                op: AtomicOP::load_op(ty),
-                                rd: writable_spilltmp_reg2(),
-                                addr: p,
-                                src: zero_reg(),
-                                amo: AMO::SeqCst,
-                            }
-                            .emit(sink, emit_info, state);
-                            AtomicOP::merge(
-                                writable_spilltmp_reg2(),
-                                writable_spilltmp_reg(),
-                                offset,
-                                t0.to_reg(),
-                                ty,
-                            )
-                            .iter()
-                            .for_each(|i| i.emit(sink, emit_info, state));
-                            spilltmp_reg2()
-                        } else {
-                            t0.to_reg()
-                        }
-                    }
-
-                    crate::ir::AtomicRmwOp::Umin
-                    | crate::ir::AtomicRmwOp::Umax
-                    | crate::ir::AtomicRmwOp::Smin
-                    | crate::ir::AtomicRmwOp::Smax => {
-                        let label_select_dst = sink.get_label();
-                        let label_select_done = sink.get_label();
-                        if op == crate::ir::AtomicRmwOp::Umin || op == crate::ir::AtomicRmwOp::Umax
-                        {
-                            AtomicOP::extract(dst, offset, dst.to_reg(), ty)
-                        } else {
-                            AtomicOP::extract_sext(dst, offset, dst.to_reg(), ty)
-                        }
-                        .iter()
-                        .for_each(|i| i.emit(sink, emit_info, state));
-
-                        Inst::CondBr {
-                            taken: CondBrTarget::Label(label_select_dst),
-                            not_taken: CondBrTarget::Fallthrough,
-                            kind: IntegerCompare {
-                                kind: match op {
-                                    crate::ir::AtomicRmwOp::Umin => IntCC::UnsignedLessThan,
-                                    crate::ir::AtomicRmwOp::Umax => IntCC::UnsignedGreaterThan,
-                                    crate::ir::AtomicRmwOp::Smin => IntCC::SignedLessThan,
-                                    crate::ir::AtomicRmwOp::Smax => IntCC::SignedGreaterThan,
-                                    _ => unreachable!(),
-                                },
-                                rs1: dst.to_reg(),
-                                rs2: x,
-                            },
-                        }
-                        .emit(sink, emit_info, state);
-                        // here we select x.
-                        Inst::gen_move(t0, x, I64).emit(sink, emit_info, state);
-                        Inst::gen_jump(label_select_done).emit(sink, emit_info, state);
-                        sink.bind_label(label_select_dst, &mut state.ctrl_plane);
-                        Inst::gen_move(t0, dst.to_reg(), I64).emit(sink, emit_info, state);
-                        sink.bind_label(label_select_done, &mut state.ctrl_plane);
-                        Inst::Atomic {
-                            op: AtomicOP::load_op(ty),
-                            rd: writable_spilltmp_reg2(),
-                            addr: p,
-                            src: zero_reg(),
-                            amo: AMO::SeqCst,
-                        }
-                        .emit(sink, emit_info, state);
-                        AtomicOP::merge(
-                            writable_spilltmp_reg2(),
-                            writable_spilltmp_reg(),
-                            offset,
-                            t0.to_reg(),
-                            ty,
-                        )
-                        .iter()
-                        .for_each(|i| i.emit(sink, emit_info, state));
-                        spilltmp_reg2()
-                    }
-                    crate::ir::AtomicRmwOp::Xchg => {
-                        AtomicOP::extract(dst, offset, dst.to_reg(), ty)
-                            .iter()
-                            .for_each(|i| i.emit(sink, emit_info, state));
-                        Inst::Atomic {
-                            op: AtomicOP::load_op(ty),
-                            rd: writable_spilltmp_reg2(),
-                            addr: p,
-                            src: zero_reg(),
-                            amo: AMO::SeqCst,
-                        }
-                        .emit(sink, emit_info, state);
-                        AtomicOP::merge(
-                            writable_spilltmp_reg2(),
-                            writable_spilltmp_reg(),
-                            offset,
-                            x,
-                            ty,
-                        )
-                        .iter()
-                        .for_each(|i| i.emit(sink, emit_info, state));
-                        spilltmp_reg2()
-                    }
-                };
-
-                Inst::Atomic {
-                    op: AtomicOP::store_op(ty),
-                    rd: t0,
-                    addr: p,
-                    src: store_value,
-                    amo: AMO::SeqCst,
-                }
-                .emit(sink, emit_info, state);
-
-                // if store is not ok,retry.
-                Inst::CondBr {
-                    taken: CondBrTarget::Label(retry),
-                    not_taken: CondBrTarget::Fallthrough,
-                    kind: IntegerCompare {
-                        kind: IntCC::NotEqual,
-                        rs1: t0.to_reg(),
-                        rs2: zero_reg(),
-                    },
-                }
-                .emit(sink, emit_info, state);
-            }
 
             &Inst::LoadExtName {
                 rd,
@@ -1895,7 +857,7 @@ impl Inst {
                     sink.add_reloc(Reloc::RiscvPCRelLo12I, &auipc_label, 0);
                     Inst::Load {
                         rd,
-                        op: LoadOP::Ld,
+                        op: LoadOP::Lw,
                         flags: MemFlags::trusted(),
                         from: AMode::RegOffset(rd.to_reg(), 0),
                     }
@@ -1917,7 +879,7 @@ impl Inst {
                     // Load the value from a label
                     Inst::Load {
                         rd,
-                        op: LoadOP::Ld,
+                        op: LoadOP::Lw,
                         flags: MemFlags::trusted(),
                         from: AMode::Label(label_data),
                     }
@@ -2005,42 +967,6 @@ impl Inst {
                 sink.add_trap(trap_code);
                 sink.put_data(Inst::TRAP_OPCODE);
             }
-            &Inst::AtomicLoad { rd, ty, p } => {
-                // emit the fence.
-                Inst::Fence {
-                    pred: Inst::FENCE_REQ_R | Inst::FENCE_REQ_W,
-                    succ: Inst::FENCE_REQ_R | Inst::FENCE_REQ_W,
-                }
-                .emit(sink, emit_info, state);
-                // load.
-                Inst::Load {
-                    rd: rd,
-                    op: LoadOP::from_type(ty),
-                    flags: MemFlags::new(),
-                    from: AMode::RegOffset(p, 0),
-                }
-                .emit(sink, emit_info, state);
-                Inst::Fence {
-                    pred: Inst::FENCE_REQ_R,
-                    succ: Inst::FENCE_REQ_R | Inst::FENCE_REQ_W,
-                }
-                .emit(sink, emit_info, state);
-            }
-            &Inst::AtomicStore { src, ty, p } => {
-                Inst::Fence {
-                    pred: Inst::FENCE_REQ_R | Inst::FENCE_REQ_W,
-                    succ: Inst::FENCE_REQ_W,
-                }
-                .emit(sink, emit_info, state);
-                Inst::Store {
-                    to: AMode::RegOffset(p, 0),
-                    op: StoreOP::from_type(ty),
-                    flags: MemFlags::new(),
-                    src,
-                }
-                .emit(sink, emit_info, state);
-            }
-
             &Inst::Popcnt {
                 sum,
                 tmp,
@@ -2305,15 +1231,19 @@ impl Inst {
                         // if (step %=8 != 0) then tmp2 = tmp2 << 1
                         let label_over = sink.get_label();
                         let label_sll_1 = sink.get_label();
-                        Inst::load_imm12(writable_spilltmp_reg2(), Imm12::from_i16(8))
+                        // Load the immediate value 7 (0b111) into a temporary register.
+                        Inst::load_imm12(writable_spilltmp_reg2(), Imm12::from_i16(7))
                             .emit(sink, emit_info, state);
+                        // Perform `step & 0b111` and store the result in spilltmp_reg2.
                         Inst::AluRRR {
-                            alu_op: AluOPRRR::Rem,
+                            alu_op: AluOPRRR::And,
                             rd: writable_spilltmp_reg2(),
                             rs1: step.to_reg(),
                             rs2: spilltmp_reg2(),
                         }
                         .emit(sink, emit_info, state);
+                        // Now, spilltmp_reg2 will contain 0 if step is divisible by 8.
+                        // Use this result in a conditional branch to decide on the right shift or left shift.
                         Inst::CondBr {
                             taken: CondBrTarget::Label(label_sll_1),
                             not_taken: CondBrTarget::Fallthrough,
@@ -2352,10 +1282,10 @@ impl Inst {
                 tmp: guard_size_tmp,
             } => {
                 let step = writable_spilltmp_reg();
-                Inst::load_constant_u64(step, (guard_size as u64) * (probe_count as u64))
+                Inst::load_constant_u32(step, (guard_size as u64) * (probe_count as u64))
                     .iter()
                     .for_each(|i| i.emit(sink, emit_info, state));
-                Inst::load_constant_u64(guard_size_tmp, guard_size as u64)
+                Inst::load_constant_u32(guard_size_tmp, guard_size as u64)
                     .iter()
                     .for_each(|i| i.emit(sink, emit_info, state));
 
@@ -2397,175 +1327,6 @@ impl Inst {
                 .emit(sink, emit_info, state);
                 Inst::gen_jump(loop_start).emit(sink, emit_info, state);
                 sink.bind_label(label_done, &mut state.ctrl_plane);
-            }
-            &Inst::VecAluRRRImm5 {
-                op,
-                vd,
-                vd_src,
-                imm,
-                vs2,
-                ref mask,
-                ..
-            } => {
-                debug_assert_eq!(vd.to_reg(), vd_src);
-
-                sink.put4(encode_valu_rrr_imm(op, vd, imm, vs2, *mask));
-            }
-            &Inst::VecAluRRRR {
-                op,
-                vd,
-                vd_src,
-                vs1,
-                vs2,
-                ref mask,
-                ..
-            } => {
-                debug_assert_eq!(vd.to_reg(), vd_src);
-
-                sink.put4(encode_valu_rrrr(op, vd, vs2, vs1, *mask));
-            }
-            &Inst::VecAluRRR {
-                op,
-                vd,
-                vs1,
-                vs2,
-                ref mask,
-                ..
-            } => {
-                sink.put4(encode_valu(op, vd, vs1, vs2, *mask));
-            }
-            &Inst::VecAluRRImm5 {
-                op,
-                vd,
-                imm,
-                vs2,
-                ref mask,
-                ..
-            } => {
-                sink.put4(encode_valu_rr_imm(op, vd, imm, vs2, *mask));
-            }
-            &Inst::VecAluRR {
-                op,
-                vd,
-                vs,
-                ref mask,
-                ..
-            } => {
-                sink.put4(encode_valu_rr(op, vd, vs, *mask));
-            }
-            &Inst::VecAluRImm5 {
-                op,
-                vd,
-                imm,
-                ref mask,
-                ..
-            } => {
-                sink.put4(encode_valu_r_imm(op, vd, imm, *mask));
-            }
-            &Inst::VecSetState { rd, ref vstate } => {
-                sink.put4(encode_vcfg_imm(
-                    0x57,
-                    rd.to_reg(),
-                    vstate.avl.unwrap_static(),
-                    &vstate.vtype,
-                ));
-
-                // Update the current vector emit state.
-                state.vstate = EmitVState::Known(*vstate);
-            }
-
-            &Inst::VecLoad {
-                eew,
-                to,
-                ref from,
-                ref mask,
-                flags,
-                ..
-            } => {
-                // Vector Loads don't support immediate offsets, so we need to load it into a register.
-                let addr = match from {
-                    VecAMode::UnitStride { base } => {
-                        let base_reg = base.get_base_register();
-                        let offset = base.get_offset_with_state(state);
-
-                        // Reg+0 Offset can be directly encoded
-                        if let (Some(base_reg), 0) = (base_reg, offset) {
-                            base_reg
-                        } else {
-                            // Otherwise load the address it into a reg and load from it.
-                            let tmp = writable_spilltmp_reg();
-                            Inst::LoadAddr {
-                                rd: tmp,
-                                mem: *base,
-                            }
-                            .emit(sink, emit_info, state);
-                            tmp.to_reg()
-                        }
-                    }
-                };
-
-                if let Some(trap_code) = flags.trap_code() {
-                    // Register the offset at which the actual load instruction starts.
-                    sink.add_trap(trap_code);
-                }
-
-                sink.put4(encode_vmem_load(
-                    0x07,
-                    to.to_reg(),
-                    eew,
-                    addr,
-                    from.lumop(),
-                    *mask,
-                    from.mop(),
-                    from.nf(),
-                ));
-            }
-
-            &Inst::VecStore {
-                eew,
-                ref to,
-                from,
-                ref mask,
-                flags,
-                ..
-            } => {
-                // Vector Stores don't support immediate offsets, so we need to load it into a register.
-                let addr = match to {
-                    VecAMode::UnitStride { base } => {
-                        let base_reg = base.get_base_register();
-                        let offset = base.get_offset_with_state(state);
-
-                        // Reg+0 Offset can be directly encoded
-                        if let (Some(base_reg), 0) = (base_reg, offset) {
-                            base_reg
-                        } else {
-                            // Otherwise load the address it into a reg and load from it.
-                            let tmp = writable_spilltmp_reg();
-                            Inst::LoadAddr {
-                                rd: tmp,
-                                mem: *base,
-                            }
-                            .emit(sink, emit_info, state);
-                            tmp.to_reg()
-                        }
-                    }
-                };
-
-                if let Some(trap_code) = flags.trap_code() {
-                    // Register the offset at which the actual load instruction starts.
-                    sink.add_trap(trap_code);
-                }
-
-                sink.put4(encode_vmem_store(
-                    0x27,
-                    from,
-                    eew,
-                    addr,
-                    to.sumop(),
-                    *mask,
-                    to.mop(),
-                    to.nf(),
-                ));
             }
         };
     }

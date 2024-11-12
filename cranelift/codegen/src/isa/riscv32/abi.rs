@@ -565,7 +565,7 @@ impl ABIMachineSpec for Riscv32MachineDeps {
         let arg1 = Writable::from_reg(x_reg(11));
         let arg2 = Writable::from_reg(x_reg(12));
         let tmp = alloc_tmp(Self::word_type());
-        insts.extend(Inst::load_constant_u64(tmp, size as u64).into_iter());
+        insts.extend(Inst::load_constant_u32(tmp, size as u64).into_iter());
         insts.push(Inst::Call {
             info: Box::new(CallInfo {
                 dest: ExternalName::LibCall(LibCall::Memcpy),
@@ -939,7 +939,7 @@ impl Riscv32MachineDeps {
         // reload it for each probe. It's worth loading this as a negative and
         // using an `add` instruction since we have compressed versions of `add`
         // but not the `sub` instruction.
-        insts.extend(Inst::load_constant_u64(tmp, (-(guard_size as i64)) as u64));
+        insts.extend(Inst::load_constant_u32(tmp, (-(guard_size as i64)) as u64));
 
         for _ in 0..probe_count {
             insts.push(Inst::AluRRR {

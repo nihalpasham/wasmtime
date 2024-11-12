@@ -377,6 +377,10 @@ impl AluOPRRR {
         }
     }
 
+    pub(crate) fn reverse_rs(self) -> bool {
+        false
+    }
+
 }
 
 impl AluOPRRI {
