@@ -349,7 +349,7 @@ fn test_riscv32_binemit() {
     let emit_info = EmitInfo::new(flags, isa_flags);
 
     for unit in insns.iter() {
-        println!("Riscv64: {:?}, {}", unit.inst, unit.assembly);
+        println!("Riscv32: {:?}, {}", unit.inst, unit.assembly);
         // Check the printed text is as expected.
         let actual_printing = unit.inst.print_with_state(&mut EmitState::default());
         assert_eq!(unit.assembly, actual_printing);

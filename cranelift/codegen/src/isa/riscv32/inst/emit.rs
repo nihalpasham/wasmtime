@@ -497,7 +497,7 @@ impl Inst {
                 };
             }
 
-            &Inst::Mov { rd, rm, ty } => {
+            &Inst::Mov { rd, rm, .. } => {
                 debug_assert_eq!(rd.to_reg().class(), rm.class());
                 if rd.to_reg() == rm {
                     return;
