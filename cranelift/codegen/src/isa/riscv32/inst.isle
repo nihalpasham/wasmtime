@@ -627,8 +627,13 @@
   (load_imm12 x)
   (rv_addi (zero_reg) (imm12_const x)))
 
+;;;; Helpers for Emitting Calls ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
+(decl gen_call (SigRef ExternalName RelocDistance ValueSlice) InstOutput)
+(extern constructor gen_call gen_call)
 
+(decl gen_call_indirect (SigRef Value ValueSlice) InstOutput)
+(extern constructor gen_call_indirect gen_call_indirect)
 
 ;; These types are for testing - i.e. check if we have an working ISLE file 
 

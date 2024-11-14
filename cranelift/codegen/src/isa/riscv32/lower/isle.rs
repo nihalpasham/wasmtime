@@ -6,10 +6,10 @@ pub mod generated_code;
 use generated_code::MInst;
 
 // Types that the generated ISLE code uses via `use super::*`.
-use self::generated_code::{FpuOPWidth, VecAluOpRR, VecLmul};
+use crate::isa;
 use crate::isa::riscv32::abi::Riscv32ABICallSite;
 use crate::isa::riscv32::lower::args::{
-    FReg, VReg, WritableFReg, WritableVReg, WritableXReg, XReg,
+    WritableXReg, XReg,
 };
 use crate::isa::riscv32::Riscv32Backend;
 use crate::machinst::Reg;
@@ -17,7 +17,7 @@ use crate::machinst::{isle::*, CallInfo, MachInst};
 use crate::machinst::{VCodeConstant, VCodeConstantData};
 use crate::{
     ir::{
-        immediates::*, types::*, AtomicRmwOp, BlockCall, ExternalName, Inst, InstructionData,
+        immediates::*, types::*, BlockCall, ExternalName, Inst, InstructionData,
         MemFlags, Opcode, TrapCode, Value, ValueList,
     },
     isa::riscv32::inst::*,
@@ -83,36 +83,6 @@ impl generated_code::Context for RV32IsleContext<'_, '_, MInst, Riscv32Backend> 
         let supported = match ty {
             // Scalar integers are always supported
             ty if ty.is_int() => true,
-            // Floating point types depend on certain extensions
-            F16 => self.backend.isa_flags.has_zfh(),
-            // F32 depends on the F extension
-            F32 => self.backend.isa_flags.has_f(),
-            // F64 depends on the D extension
-            F64 => self.backend.isa_flags.has_d(),
-
-            // The base vector extension supports all integer types, up to 64 bits
-            // as long as they fit in a register
-            ty if self.ty_vec_fits_in_register(ty).is_some()
-                && lane_type.is_int()
-                && lane_type.bits() <= 64 =>
-            {
-                true
-            }
-
-            // If the vector type has floating point lanes then the spec states:
-            //
-            // Vector instructions where any floating-point vector operand’s EEW is not a
-            // supported floating-point type width (which includes when FLEN < SEW) are reserved.
-            //
-            // So we also have to check if we support the scalar version of the type.
-            ty if self.ty_vec_fits_in_register(ty).is_some()
-                && lane_type.is_float()
-                && self.ty_supported(lane_type).is_some()
-                // Additionally the base V spec only supports 32 and 64 bit floating point types.
-                && (lane_type.bits() == 32 || lane_type.bits() == 64) =>
-            {
-                true
-            }
 
             // Otherwise do not match
             _ => false,
