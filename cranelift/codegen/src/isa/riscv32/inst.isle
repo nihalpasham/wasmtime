@@ -403,69 +403,231 @@
 
 ;; Allocates a new `WritableXReg`.
 (decl temp_writable_xreg () WritableXReg)
-(rule (temp_writable_xreg) (temp_writable_reg $I64))
+(rule (temp_writable_xreg) (temp_writable_reg $I32))
 
 
+;; Converters
 
-;; Construct a new `VReg` from a `Reg`.
-;;
-;; Asserts that the register has a Vector RegClass.
-(decl vreg_new (Reg) VReg)
-(extern constructor vreg_new vreg_new)
-(convert Reg VReg vreg_new)
+(convert u8 i32 u8_as_i32)
+(decl u8_as_i32 (u8) i32)
+(extern constructor u8_as_i32 u8_as_i32)
 
-;; Construct a new `WritableVReg` from a `WritableReg`.
-;;
-;; Asserts that the register has a Vector RegClass.
-(decl writable_vreg_new (WritableReg) WritableVReg)
-(extern constructor writable_vreg_new writable_vreg_new)
-(convert WritableReg WritableVReg writable_vreg_new)
+;; ISA Extension helpers
 
-;; Put a value into a VReg.
-;;
-;; Asserts that the value goes into a VReg.
-(decl put_in_vreg (Value) VReg)
-(rule (put_in_vreg val) (vreg_new (put_in_reg val)))
-(convert Value VReg put_in_vreg)
+(decl pure has_m () bool)
+(extern constructor has_m has_m)
 
-;; Construct an `InstOutput` out of a single VReg register.
-(decl output_vreg (VReg) InstOutput)
-(rule (output_vreg x) (output_reg x))
-(convert VReg InstOutput output_vreg)
+(decl pure has_v () bool)
+(extern constructor has_v has_v)
 
-;; Convert a `WritableVReg` to an `VReg`.
-(decl pure writable_vreg_to_vreg (WritableVReg) VReg)
-(extern constructor writable_vreg_to_vreg writable_vreg_to_vreg)
-(convert WritableVReg VReg writable_vreg_to_vreg)
+(decl pure has_zfa () bool)
+(extern constructor has_zfa has_zfa)
 
-;; Convert a `WritableVReg` to an `WritableReg`.
-(decl pure writable_vreg_to_writable_reg (WritableVReg) WritableReg)
-(extern constructor writable_vreg_to_writable_reg writable_vreg_to_writable_reg)
-(convert WritableVReg WritableReg writable_vreg_to_writable_reg)
+(decl pure has_zfh () bool)
+(extern constructor has_zfh has_zfh)
 
-;; Convert a `WritableVReg` to an `Reg`.
-(decl pure writable_vreg_to_reg (WritableVReg) Reg)
-(rule (writable_vreg_to_reg x) (writable_vreg_to_writable_reg x))
-(convert WritableVReg Reg writable_vreg_to_reg)
+(decl pure has_zbkb () bool)
+(extern constructor has_zbkb has_zbkb)
 
-;; Convert an `VReg` to a `Reg`.
-(decl pure vreg_to_reg (VReg) Reg)
-(extern constructor vreg_to_reg vreg_to_reg)
-(convert VReg Reg vreg_to_reg)
+(decl pure has_zba () bool)
+(extern constructor has_zba has_zba)
 
-;; Convert a `VReg` to a `ValueRegs`.
-(decl vreg_to_value_regs (VReg) ValueRegs)
-(rule (vreg_to_value_regs x) (value_reg x))
-(convert VReg ValueRegs xreg_to_reg)
+(decl pure has_zbb () bool)
+(extern constructor has_zbb has_zbb)
 
-;; Convert a `WritableVReg` to a `ValueRegs`.
-(decl writable_vreg_to_value_regs (WritableVReg) ValueRegs)
-(rule (writable_vreg_to_value_regs x) (value_reg x))
-(convert WritableVReg ValueRegs writable_vreg_to_value_regs)
+(decl pure has_zbc () bool)
+(extern constructor has_zbc has_zbc)
 
-;; Allocates a new `WritableVReg`.
-(decl temp_writable_vreg () WritableVReg)
-(rule (temp_writable_vreg) (temp_writable_reg $I8X16))
+(decl pure has_zbs () bool)
+(extern constructor has_zbs has_zbs)
+
+(decl pure has_zicond () bool)
+(extern constructor has_zicond has_zicond)
+
+
+;;;; Type Helpers ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; Helper that matches any supported type. This extractor checks the ISA flags
+;; to determine if the type is supported.
+(decl ty_supported (Type) Type)
+(extern extractor ty_supported ty_supported)
+
+
+;;;; Instruction Helpers ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; RV32I Base Integer Instruction Set
+
+;; Helper for emitting the `add` instruction.
+;; rd ← rs1 + rs2
+(decl rv_add (XReg XReg) XReg)
+(rule (rv_add rs1 rs2)
+  (alu_rrr (AluOPRRR.Add) rs1 rs2))
+
+;; Helper for emitting the `addi` ("Add Immediate") instruction.
+;; rd ← rs1 + sext(imm)
+(decl rv_addi (XReg Imm12) XReg)
+(rule (rv_addi rs1 imm)
+  (alu_rr_imm12 (AluOPRRI.Addi) rs1 imm))
+
+;; Helper for emitting the `sub` instruction.
+;; rd ← rs1 - rs2
+(decl rv_sub (XReg XReg) XReg)
+(rule (rv_sub rs1 rs2)
+  (alu_rrr (AluOPRRR.Sub) rs1 rs2))
+
+;; Helper for emitting the `neg` instruction.
+;; This instruction is a mnemonic for `sub rd, zero, rs1`.
+(decl rv_neg (XReg) XReg)
+(rule (rv_neg rs1)
+  (alu_rrr (AluOPRRR.Sub) (zero_reg) rs1))
+
+;; Helper for emitting the `sll` ("Shift Left Logical") instruction.
+;; rd ← rs1 << rs2
+(decl rv_sll (XReg XReg) XReg)
+(rule (rv_sll rs1 rs2)
+  (alu_rrr (AluOPRRR.Sll) rs1 rs2))
+
+;; Helper for emitting the `slli` ("Shift Left Logical Immediate") instruction.
+;; rd ← rs1 << uext(imm)
+(decl rv_slli (XReg Imm12) XReg)
+(rule (rv_slli rs1 imm)
+  (alu_rr_imm12 (AluOPRRI.Slli) rs1 imm))
+
+;; Helper for emitting the `srl` ("Shift Right Logical") instruction.
+;; rd ← rs1 >> rs2
+(decl rv_srl (XReg XReg) XReg)
+(rule (rv_srl rs1 rs2)
+  (alu_rrr (AluOPRRR.Srl) rs1 rs2))
+
+;; Helper for emitting the `srli` ("Shift Right Logical Immediate") instruction.
+;; rd ← rs1 >> uext(imm)
+(decl rv_srli (XReg Imm12) XReg)
+(rule (rv_srli rs1 imm)
+  (alu_rr_imm12 (AluOPRRI.Srli) rs1 imm))
+
+;; Helper for emitting the `sra` ("Shift Right Arithmetic") instruction.
+;; rd ← rs1 >> rs2
+(decl rv_sra (XReg XReg) XReg)
+(rule (rv_sra rs1 rs2)
+  (alu_rrr (AluOPRRR.Sra) rs1 rs2))
+
+;; Helper for emitting the `srai` ("Shift Right Arithmetic Immediate") instruction.
+;; rd ← rs1 >> uext(imm)
+(decl rv_srai (XReg Imm12) XReg)
+(rule (rv_srai rs1 imm)
+  (alu_rr_imm12 (AluOPRRI.Srai) rs1 imm))
+
+;; Helper for emitting the `or` instruction.
+;; rd ← rs1 ∨ rs2
+(decl rv_or (XReg XReg) XReg)
+(rule (rv_or rs1 rs2)
+  (alu_rrr (AluOPRRR.Or) rs1 rs2))
+
+;; Helper for emitting the `ori` ("Or Immediate") instruction.
+;; rd ← rs1 ∨ uext(imm)
+(decl rv_ori (XReg Imm12) XReg)
+(rule (rv_ori rs1 imm)
+  (alu_rr_imm12 (AluOPRRI.Ori) rs1 imm))
+
+;; Helper for emitting the `xor` instruction.
+;; rd ← rs1 ⊕ rs2
+(decl rv_xor (XReg XReg) XReg)
+(rule (rv_xor rs1 rs2)
+  (alu_rrr (AluOPRRR.Xor) rs1 rs2))
+
+;; Helper for emitting the `xori` ("Exclusive Or Immediate") instruction.
+;; rd ← rs1 ⊕ uext(imm)
+(decl rv_xori (XReg Imm12) XReg)
+(rule (rv_xori rs1 imm)
+  (alu_rr_imm12 (AluOPRRI.Xori) rs1 imm))
+
+;; Helper for emitting the `not` instruction.
+;; This instruction is a mnemonic for `xori rd, rs1, -1`.
+(decl rv_not (XReg) XReg)
+(rule (rv_not rs1)
+  (rv_xori rs1 (imm12_const -1)))
+
+;; Helper for emitting the `and` instruction.
+;; rd ← rs1 ∧ rs2
+(decl rv_and (XReg XReg) XReg)
+(rule (rv_and rs1 rs2)
+  (alu_rrr (AluOPRRR.And) rs1 rs2))
+
+;; Helper for emitting the `andi` ("And Immediate") instruction.
+;; rd ← rs1 ∧ uext(imm)
+(decl rv_andi (XReg Imm12) XReg)
+(rule (rv_andi rs1 imm)
+  (alu_rr_imm12 (AluOPRRI.Andi) rs1 imm))
+
+;; Helper for emitting the `slt` ("Set Less Than") instruction.
+;; rd ← rs1 < rs2
+(decl rv_slt (XReg XReg) XReg)
+(rule (rv_slt rs1 rs2)
+  (alu_rrr (AluOPRRR.Slt) rs1 rs2))
+
+;; Helper for emitting the `sltu` ("Set Less Than Unsigned") instruction.
+;; rd ← rs1 < rs2
+(decl rv_sltu (XReg XReg) XReg)
+(rule (rv_sltu rs1 rs2)
+  (alu_rrr (AluOPRRR.SltU) rs1 rs2))
+
+;; Helper for emitting the `snez` instruction.
+;; This instruction is a mnemonic for `sltu rd, zero, rs`.
+(decl rv_snez (XReg) XReg)
+(rule (rv_snez rs1)
+  (rv_sltu (zero_reg) rs1))
+
+;; Helper for emitting the `slti` ("Set Less Than Immediate") instruction.
+;; rd ← rs1 < imm
+(decl rv_slti (XReg Imm12) XReg)
+(rule (rv_slti rs1 imm)
+  (alu_rr_imm12 (AluOPRRI.Slti) rs1 imm))
+
+;; Helper for emitting the `sltiu` ("Set Less Than Immediate Unsigned") instruction.
+;; rd ← rs1 < imm
+(decl rv_sltiu (XReg Imm12) XReg)
+(rule (rv_sltiu rs1 imm)
+  (alu_rr_imm12 (AluOPRRI.SltiU) rs1 imm))
+
+;; Helper for emitting the `seqz` instruction.
+;; This instruction is a mnemonic for `sltiu rd, rs, 1`.
+(decl rv_seqz (XReg) XReg)
+(rule (rv_seqz rs1)
+  (rv_sltiu rs1 (imm12_const 1)))
+
+;; Helper for emitting `MInst.AluRRR` instructions.
+(decl alu_rrr (AluOPRRR Reg Reg) Reg)
+(rule (alu_rrr op src1 src2)
+      (let ((dst WritableXReg (temp_writable_xreg))
+            (_ Unit (emit (MInst.AluRRR op dst src1 src2))))
+        dst))
+
+;; Helper for emitting `MInst.AluRRImm12` instructions.
+(decl alu_rr_imm12 (AluOPRRI Reg Imm12) Reg)
+(rule (alu_rr_imm12 op src imm)
+      (let ((dst WritableXReg (temp_writable_xreg))
+            (_ Unit (emit (MInst.AluRRImm12 op dst src imm))))
+        dst))
+
+; Helper for creating the zero register.
+(decl zero_reg () XReg)
+(extern constructor zero_reg zero_reg)
+(extern extractor zero_reg is_zero_reg)
+
+; Imm12 Rules
+
+(decl pure imm12_zero () Imm12)
+(rule (imm12_zero) (imm12_const 0))
+
+(decl pure imm12_const (i32) Imm12)
+(extern constructor imm12_const imm12_const)
+
+(decl load_imm12 (i32) Reg)
+(rule
+  (load_imm12 x)
+  (rv_addi (zero_reg) (imm12_const x)))
+
+
 
 
 ;; These types are for testing - i.e. check if we have an working ISLE file 

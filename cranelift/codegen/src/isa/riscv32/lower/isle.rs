@@ -7,7 +7,6 @@ use generated_code::MInst;
 
 // Types that the generated ISLE code uses via `use super::*`.
 use self::generated_code::{FpuOPWidth, VecAluOpRR, VecLmul};
-use crate::isa;
 use crate::isa::riscv32::abi::Riscv32ABICallSite;
 use crate::isa::riscv32::lower::args::{
     FReg, VReg, WritableFReg, WritableVReg, WritableXReg, XReg,
@@ -62,31 +61,7 @@ impl generated_code::Context for RV32IsleContext<'_, '_, MInst, Riscv32Backend> 
     isle_lower_prelude_methods!();
     isle_prelude_caller_methods!(Riscv32ABICallSite);
 
-    fn fpu_op_width_from_ty(&mut self, ty: Type) -> FpuOPWidth {
-        match ty {
-            F16 => FpuOPWidth::H,
-            F32 => FpuOPWidth::S,
-            F64 => FpuOPWidth::D,
-            F128 => FpuOPWidth::Q,
-            _ => unimplemented!("Unimplemented FPU Op Width: {ty}"),
-        }
-    }
-
-    fn vreg_new(&mut self, r: Reg) -> VReg {
-        VReg::new(r).unwrap()
-    }
-    fn writable_vreg_new(&mut self, r: WritableReg) -> WritableVReg {
-        r.map(|wr| VReg::new(wr).unwrap())
-    }
-    fn writable_vreg_to_vreg(&mut self, arg0: WritableVReg) -> VReg {
-        arg0.to_reg()
-    }
-    fn writable_vreg_to_writable_reg(&mut self, arg0: WritableVReg) -> WritableReg {
-        arg0.map(|vr| vr.to_reg())
-    }
-    fn vreg_to_reg(&mut self, arg0: VReg) -> Reg {
-        *arg0
-    }
+    
     fn xreg_new(&mut self, r: Reg) -> XReg {
         XReg::new(r).unwrap()
     }
@@ -101,34 +76,6 @@ impl generated_code::Context for RV32IsleContext<'_, '_, MInst, Riscv32Backend> 
     }
     fn xreg_to_reg(&mut self, arg0: XReg) -> Reg {
         *arg0
-    }
-    fn freg_new(&mut self, r: Reg) -> FReg {
-        FReg::new(r).unwrap()
-    }
-    fn writable_freg_new(&mut self, r: WritableReg) -> WritableFReg {
-        r.map(|wr| FReg::new(wr).unwrap())
-    }
-    fn writable_freg_to_freg(&mut self, arg0: WritableFReg) -> FReg {
-        arg0.to_reg()
-    }
-    fn writable_freg_to_writable_reg(&mut self, arg0: WritableFReg) -> WritableReg {
-        arg0.map(|fr| fr.to_reg())
-    }
-    fn freg_to_reg(&mut self, arg0: FReg) -> Reg {
-        *arg0
-    }
-
-    fn min_vec_reg_size(&mut self) -> u64 {
-        self.min_vec_reg_size
-    }
-
-    #[inline]
-    fn ty_vec_fits_in_register(&mut self, ty: Type) -> Option<Type> {
-        if ty.is_vector() && (ty.bits() as u64) <= self.min_vec_reg_size() {
-            Some(ty)
-        } else {
-            None
-        }
     }
 
     fn ty_supported(&mut self, ty: Type) -> Option<Type> {
@@ -178,14 +125,6 @@ impl generated_code::Context for RV32IsleContext<'_, '_, MInst, Riscv32Backend> 
         }
     }
 
-    fn ty_supported_float(&mut self, ty: Type) -> Option<Type> {
-        self.ty_supported(ty).filter(|ty| ty.is_float())
-    }
-
-    fn ty_supported_vec(&mut self, ty: Type) -> Option<Type> {
-        self.ty_supported(ty).filter(|ty| ty.is_vector())
-    }
-
     fn load_ra(&mut self) -> Reg {
         if self.backend.flags.preserve_frame_pointers() {
             let tmp = self.temp_writable_reg(I64);
@@ -207,20 +146,6 @@ impl generated_code::Context for RV32IsleContext<'_, '_, MInst, Riscv32Backend> 
 
     fn imm12_and(&mut self, imm: Imm12, x: u64) -> Imm12 {
         Imm12::from_i16(imm.as_i16() & (x as i16))
-    }
-
-    fn fli_constant_from_u64(&mut self, ty: Type, imm: u64) -> Option<FliConstant> {
-        FliConstant::maybe_from_u64(ty, imm)
-    }
-
-    fn fli_constant_from_negated_u64(&mut self, ty: Type, imm: u64) -> Option<FliConstant> {
-        let negated_imm = match ty {
-            F64 => imm ^ 0x8000000000000000,
-            F32 => imm ^ 0x80000000,
-            _ => unimplemented!(),
-        };
-
-        FliConstant::maybe_from_u64(ty, negated_imm)
     }
 
     fn i64_generate_imm(&mut self, imm: i64) -> Option<(Imm20, Imm12)> {
@@ -457,23 +382,6 @@ impl generated_code::Context for RV32IsleContext<'_, '_, MInst, Riscv32Backend> 
         AMode::Const(c)
     }
 
-    fn valid_atomic_transaction(&mut self, ty: Type) -> Option<Type> {
-        if ty.is_int() && ty.bits() <= 64 {
-            Some(ty)
-        } else {
-            None
-        }
-    }
-    fn is_atomic_rmw_max_etc(&mut self, op: &AtomicRmwOp) -> Option<(AtomicRmwOp, bool)> {
-        let op = *op;
-        match op {
-            crate::ir::AtomicRmwOp::Umin => Some((op, false)),
-            crate::ir::AtomicRmwOp::Umax => Some((op, false)),
-            crate::ir::AtomicRmwOp::Smin => Some((op, true)),
-            crate::ir::AtomicRmwOp::Smax => Some((op, true)),
-            _ => None,
-        }
-    }
 
     fn sinkable_inst(&mut self, val: Value) -> Option<Inst> {
         self.is_sinkable_inst(val)
@@ -541,102 +449,7 @@ impl generated_code::Context for RV32IsleContext<'_, '_, MInst, Riscv32Backend> 
         (cmp.kind, self.xreg_new(cmp.rs1), self.xreg_new(cmp.rs2))
     }
 
-    #[inline]
-    fn vstate_from_type(&mut self, ty: Type) -> VState {
-        VState::from_type(ty)
-    }
-
-    #[inline]
-    fn vstate_mf2(&mut self, vs: VState) -> VState {
-        VState {
-            vtype: VType {
-                lmul: VecLmul::LmulF2,
-                ..vs.vtype
-            },
-            ..vs
-        }
-    }
-
-    fn vec_alu_rr_dst_type(&mut self, op: &VecAluOpRR) -> Type {
-        MInst::canonical_type_for_rc(op.dst_regclass())
-    }
-
-    fn bclr_imm(&mut self, ty: Type, i: u64) -> Option<Imm12> {
-        // Only consider those bits in the immediate which are up to the width
-        // of `ty`.
-        let neg = !i & (u64::MAX >> (64 - ty.bits()));
-        if neg.count_ones() != 1 {
-            return None;
-        }
-        Imm12::maybe_from_u64(neg.trailing_zeros().into())
-    }
-
-    fn binvi_imm(&mut self, i: u64) -> Option<Imm12> {
-        if i.count_ones() != 1 {
-            return None;
-        }
-        Imm12::maybe_from_u64(i.trailing_zeros().into())
-    }
-    fn bseti_imm(&mut self, i: u64) -> Option<Imm12> {
-        self.binvi_imm(i)
-    }
-
-    fn fcvt_smin_bound(&mut self, float: Type, int: Type, saturating: bool) -> u64 {
-        match (int, float) {
-            // Saturating cases for larger integers are handled using the
-            // `fcvt.{w,d}.{s,d}` instruction directly, that automatically
-            // saturates up/down to the correct limit.
-            //
-            // NB: i32/i64 don't use this function because the native RISC-V
-            // instruction does everything we already need, so only cases for
-            // i8/i16 are listed here.
-            (I8, F32) if saturating => f32::from(i8::MIN).to_bits().into(),
-            (I8, F64) if saturating => f64::from(i8::MIN).to_bits(),
-            (I16, F32) if saturating => f32::from(i16::MIN).to_bits().into(),
-            (I16, F64) if saturating => f64::from(i16::MIN).to_bits(),
-
-            (_, F32) if !saturating => f32_cvt_to_int_bounds(true, int.bits()).0.to_bits().into(),
-            (_, F64) if !saturating => f64_cvt_to_int_bounds(true, int.bits()).0.to_bits(),
-            _ => unimplemented!(),
-        }
-    }
-
-    fn fcvt_smax_bound(&mut self, float: Type, int: Type, saturating: bool) -> u64 {
-        // NB: see `fcvt_smin_bound` for some more comments
-        match (int, float) {
-            (I8, F32) if saturating => f32::from(i8::MAX).to_bits().into(),
-            (I8, F64) if saturating => f64::from(i8::MAX).to_bits(),
-            (I16, F32) if saturating => f32::from(i16::MAX).to_bits().into(),
-            (I16, F64) if saturating => f64::from(i16::MAX).to_bits(),
-
-            (_, F32) if !saturating => f32_cvt_to_int_bounds(true, int.bits()).1.to_bits().into(),
-            (_, F64) if !saturating => f64_cvt_to_int_bounds(true, int.bits()).1.to_bits(),
-            _ => unimplemented!(),
-        }
-    }
-
-    fn fcvt_umax_bound(&mut self, float: Type, int: Type, saturating: bool) -> u64 {
-        // NB: see `fcvt_smin_bound` for some more comments
-        match (int, float) {
-            (I8, F32) if saturating => f32::from(u8::MAX).to_bits().into(),
-            (I8, F64) if saturating => f64::from(u8::MAX).to_bits(),
-            (I16, F32) if saturating => f32::from(u16::MAX).to_bits().into(),
-            (I16, F64) if saturating => f64::from(u16::MAX).to_bits(),
-
-            (_, F32) if !saturating => f32_cvt_to_int_bounds(false, int.bits()).1.to_bits().into(),
-            (_, F64) if !saturating => f64_cvt_to_int_bounds(false, int.bits()).1.to_bits(),
-            _ => unimplemented!(),
-        }
-    }
-
-    fn fcvt_umin_bound(&mut self, float: Type, saturating: bool) -> u64 {
-        assert!(!saturating);
-        match float {
-            F32 => (-1.0f32).to_bits().into(),
-            F64 => (-1.0f64).to_bits(),
-            _ => unimplemented!(),
-        }
-    }
+   
 }
 
 /// The main entry point for lowering with ISLE.
