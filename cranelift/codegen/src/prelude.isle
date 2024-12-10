@@ -154,6 +154,10 @@
 (extern constructor i32_as_i64 i32_as_i64)
 (convert i32 i64 i32_as_i64)
 
+(spec (i32_as_u32 arg) (provide (= arg result)))
+(decl pure i32_as_u32 (i32) u32)
+(extern constructor i32_as_u32 i32_as_u32)
+
 (spec (i64_as_u64 arg) (provide (= arg result)))
 (decl pure i64_as_u64 (i64) u64)
 (extern constructor i64_as_u64 i64_as_u64)
@@ -595,6 +599,15 @@
 ;; An extractor that only matches types that fit in exactly 64 bits.
 (decl ty_64 (Type) Type)
 (extern extractor ty_64 ty_64)
+
+;; A pure constructor/extractor that only matches scalar integers, and
+;; references that can fit in 32 bits.
+(spec (ty_int_ref_scalar_32 arg)
+    (provide (= result arg))
+    (require (<= arg 32)))
+(decl pure partial ty_int_ref_scalar_32 (Type) Type)
+(extern constructor ty_int_ref_scalar_32 ty_int_ref_scalar_32)
+(extern extractor ty_int_ref_scalar_32 ty_int_ref_scalar_32_extract)
 
 ;; A pure constructor/extractor that only matches scalar integers, and
 ;; references that can fit in 64 bits.

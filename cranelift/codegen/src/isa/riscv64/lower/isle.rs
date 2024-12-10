@@ -44,7 +44,7 @@ where
     pub lower_ctx: &'a mut Lower<'b, I>,
     pub backend: &'a B,
     /// Precalucated value for the minimum vector register size. Will be 0 if
-    /// vectors are not supported.
+    /// vectors are not supported.  
     min_vec_reg_size: u64,
 }
 

@@ -889,7 +889,7 @@ impl Inst {
                     Inst::gen_jump(label_end).emit(sink, emit_info, state);
 
                     sink.bind_label(label_data, &mut state.ctrl_plane);
-                    sink.add_reloc(Reloc::Abs8, name.as_ref(), offset);
+                    sink.add_reloc(Reloc::Abs8, name.as_ref(), offset as i64);
                     sink.put8(0);
 
                     sink.bind_label(label_end, &mut state.ctrl_plane);

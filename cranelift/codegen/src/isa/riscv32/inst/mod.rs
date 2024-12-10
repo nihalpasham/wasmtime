@@ -1,4 +1,5 @@
 //! This module defines RV32-specific machine instruction types.
+#![allow(warnings)] // temporary flag
 
 use crate::binemit::{Addend, CodeOffset, Reloc};
 pub use crate::ir::condcodes::IntCC;

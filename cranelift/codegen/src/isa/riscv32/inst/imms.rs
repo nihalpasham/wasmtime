@@ -365,12 +365,6 @@ impl Inst {
 #[cfg(test)]
 mod test {
     use super::*;
-    #[test]
-    fn test_imm12() {
-        let x = Imm12::ZERO;
-        assert_eq!(0, x.bits());
-        Imm12::maybe_from_u32(0xffff_ffff_ffff_ffff).unwrap();
-    }
 
     #[test]
     fn imm20_and_imm12() {

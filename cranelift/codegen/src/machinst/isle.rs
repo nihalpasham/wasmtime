@@ -415,6 +415,12 @@ macro_rules! isle_lower_prelude_methods {
         }
 
         #[inline]
+        fn emit_u32_le_const(&mut self, value: u32) -> VCodeConstant {
+            let data = VCodeConstantData::U64((value as u64).to_le_bytes());
+            self.lower_ctx.use_constant(data)
+        }
+
+        #[inline]
         fn emit_u64_le_const(&mut self, value: u64) -> VCodeConstant {
             let data = VCodeConstantData::U64(value.to_le_bytes());
             self.lower_ctx.use_constant(data)

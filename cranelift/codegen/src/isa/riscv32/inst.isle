@@ -829,6 +829,7 @@
 (decl int_compare_decompose (IntCC XReg XReg) IntegerCompare)
 (extern extractor infallible int_compare_decompose int_compare_decompose)
 
+
 ;; Defintions used in lowering rules
 
 ;; Declare a function to load immediates and attach immediate loading rules
@@ -884,6 +885,10 @@
       (_ Unit (emit (MInst.Load dst op flags amode))))
     dst))
 
+;; Returns a canonical type for a LoadOP. We only return I32.
+(decl load_op_reg_type (LoadOP) Type)
+(rule 0 (load_op_reg_type _) $I32)
+
 ;; Helper for emitting the `Lui` instruction.
 ;; TODO: This should be something like `emit_u_type`. And should share the
 ;; `MInst` with `auipc` since these instructions share the U-Type format.
@@ -894,8 +899,73 @@
         dst))
 
 (decl select_addi (Type) AluOPRRI)
-(rule 1 (select_addi (fits_in_32 ty)) (AluOPRRI.Addiw))
-(rule (select_addi (fits_in_64 ty)) (AluOPRRI.Addi))
+(rule (select_addi (fits_in_32 ty)) (AluOPRRI.Addi))
+
+(decl partial lower_branch (Inst MachLabelSlice) Unit)
+(rule (lower_branch (jump _) (single_target label))
+      (emit_side_effect (rv_j label)))
+
+(rule (lower_branch (brif v _ _) (two_targets then else))
+  (emit_side_effect (cond_br (is_nonzero_cmp v) then else)))
+
+(rule (lower_branch (br_table index _) targets)
+  (lower_br_table index targets))
+
+;; Helper for emitting the `j` mnemonic, an unconditional jump to label.
+(decl rv_j (MachLabel) SideEffectNoResult)
+(rule (rv_j label)
+  (SideEffectNoResult.Inst (MInst.Jal label)))
+
+;; Consume a CmpResult, producing a branch on its result.
+(decl cond_br (IntegerCompare CondBrTarget CondBrTarget) SideEffectNoResult)
+(rule (cond_br cmp then else)
+      (SideEffectNoResult.Inst
+        (MInst.CondBr then else cmp)))
+
+
+
+(decl cmp_nez (XReg) IntegerCompare)
+(rule (cmp_nez r) (int_compare (IntCC.NotEqual) r (zero_reg)))
+
+
+;; Helper to generate an `IntegerCompare` which represents the "truthy" value of
+;; the input provided.
+;;
+;; This is used in `Select` and `brif` for example to generate conditional
+;; branches. The returned comparison, when taken, represents that `Value` is
+;; nonzero. When not taken the input `Value` is zero.
+(decl is_nonzero_cmp (Value) IntegerCompare)
+
+;; Base case - convert to a "truthy" value and compare it against zero.
+;;
+;; Note that non-64-bit types need to be extended since the upper bits from
+;; Cranelift's point of view are undefined. Favor a zero extension for 8-bit
+;; types because that's a single `andi` instruction, but favor sign-extension
+;; for 16 and 32-bit types because many RISC-V which operate on the low 32-bits.
+;; Additionally the base 64-bit ISA has a single instruction for sign-extending
+;; from 32 to 64-bits which makes that a bit cheaper if used.
+;; of registers sign-extend the results.
+(rule 0 (is_nonzero_cmp val @ (value_type (fits_in_32 _)))
+  (cmp_nez (sext val)))
+(rule 1 (is_nonzero_cmp val @ (value_type $I8))
+  (cmp_nez (zext val)))
+
+
+;; Performs a signed extension of the given value
+(decl sext (Value) XReg)
+
+;; Same base case as `zext`, shift left-then-right.
+(rule 0 (sext val @ (value_type (fits_in_32 ty)))
+  (let ((shift Imm12 (imm_from_bits (u32_sub 32 (ty_bits ty)))))
+    (rv_srai (rv_slli val shift) shift)))
+
+;; Performs a zero extension of the given value
+(decl zext (Value) XReg)
+
+;; In the most generic case, we shift left and then shift right.
+(rule 0 (zext val @ (value_type (fits_in_32 ty)))
+  (let ((shift Imm12 (imm_from_bits (u32_sub 32 (ty_bits ty)))))
+    (rv_srli (rv_slli val shift) shift)))
 
 ;; These types are for testing - i.e. check if we have an working ISLE file 
 

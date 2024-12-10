@@ -44,6 +44,11 @@ macro_rules! isle_common_prelude_methods {
         }
 
         #[inline]
+        fn i32_as_u32(&mut self, x: i32) -> u32 {
+            x as u32
+        }
+
+        #[inline]
         fn i64_as_u64(&mut self, x: i64) -> u64 {
             x as u64
         }
@@ -358,12 +363,26 @@ macro_rules! isle_common_prelude_methods {
         }
 
         #[inline]
+        fn ty_int_ref_scalar_32(&mut self, ty: Type) -> Option<Type> {
+            if ty.bits() <= 32 && !ty.is_float() && !ty.is_vector() {
+                Some(ty)
+            } else {
+                None
+            }
+        }
+
+        #[inline]
         fn ty_int_ref_scalar_64(&mut self, ty: Type) -> Option<Type> {
             if ty.bits() <= 64 && !ty.is_float() && !ty.is_vector() {
                 Some(ty)
             } else {
                 None
             }
+        }
+
+        #[inline]
+        fn ty_int_ref_scalar_32_extract(&mut self, ty: Type) -> Option<Type> {
+            self.ty_int_ref_scalar_32(ty)
         }
 
         #[inline]
@@ -562,7 +581,7 @@ macro_rules! isle_common_prelude_methods {
 
         #[inline]
         fn u32_from_imm64(&mut self, imm: Imm64) -> u32 {
-            let imm_bits = imm.bits();
+            let imm_bits = imm.bits() as i32;
             assert!(imm_bits >= i32::MIN && imm_bits <= i32::MAX);
             imm_bits as u32
         }

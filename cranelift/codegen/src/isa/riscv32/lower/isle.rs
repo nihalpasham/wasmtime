@@ -44,6 +44,7 @@ where
     pub backend: &'a B,
     /// Precalucated value for the minimum vector register size. Will be 0 if
     /// vectors are not supported.
+    #[allow(dead_code)]
     min_vec_reg_size: u32,
 }
 
@@ -97,7 +98,7 @@ impl generated_code::Context for RV32IsleContext<'_, '_, MInst, Riscv32Backend> 
 
     fn load_ra(&mut self) -> Reg {
         if self.backend.flags.preserve_frame_pointers() {
-            let tmp = self.temp_writable_reg(I64);
+            let tmp = self.temp_writable_reg(I32);
             self.emit(&MInst::Load {
                 rd: tmp,
                 op: LoadOP::Lw,
@@ -331,7 +332,7 @@ impl generated_code::Context for RV32IsleContext<'_, '_, MInst, Riscv32Backend> 
         StoreOP::from_type(ty)
     }
     fn load_ext_name(&mut self, name: ExternalName, offset: i32) -> Reg {
-        let tmp = self.temp_writable_reg(I64);
+        let tmp = self.temp_writable_reg(I32);
         self.emit(&MInst::LoadExtName {
             rd: tmp,
             name: Box::new(name),
@@ -341,7 +342,7 @@ impl generated_code::Context for RV32IsleContext<'_, '_, MInst, Riscv32Backend> 
     }
 
     fn gen_stack_addr(&mut self, slot: StackSlot, offset: Offset32) -> Reg {
-        let result = self.temp_writable_reg(I64);
+        let result = self.temp_writable_reg(I32);
         let i = self
             .lower_ctx
             .abi()
@@ -351,8 +352,8 @@ impl generated_code::Context for RV32IsleContext<'_, '_, MInst, Riscv32Backend> 
     }
 
     fn lower_br_table(&mut self, index: Reg, targets: &[MachLabel]) -> Unit {
-        let tmp1 = self.temp_writable_reg(I64);
-        let tmp2 = self.temp_writable_reg(I64);
+        let tmp1 = self.temp_writable_reg(I32);
+        let tmp2 = self.temp_writable_reg(I32);
         self.emit(&MInst::BrTable {
             index,
             tmp1,
