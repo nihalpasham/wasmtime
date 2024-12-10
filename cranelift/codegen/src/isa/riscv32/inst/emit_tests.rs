@@ -66,7 +66,7 @@ fn test_riscv32_binemit() {
             alu_op: AluOPRRI::Addi,
             rd: writable_fp_reg(),
             rs: stack_reg(),
-            imm12: Imm12::maybe_from_u64(100).unwrap(),
+            imm12: Imm12::maybe_from_u32(100).unwrap(),
         },
         "addi fp,sp,100",
         0x6410413,

@@ -44,7 +44,7 @@ where
     pub backend: &'a B,
     /// Precalucated value for the minimum vector register size. Will be 0 if
     /// vectors are not supported.
-    min_vec_reg_size: u64,
+    min_vec_reg_size: u32,
 }
 
 impl<'a, 'b> RV32IsleContext<'a, 'b, MInst, Riscv32Backend> {
@@ -52,7 +52,7 @@ impl<'a, 'b> RV32IsleContext<'a, 'b, MInst, Riscv32Backend> {
         Self {
             lower_ctx,
             backend,
-            min_vec_reg_size: backend.isa_flags.min_vec_reg_size(),
+            min_vec_reg_size: backend.isa_flags.min_vec_reg_size() as u32,
         }
     }
 }
@@ -79,7 +79,7 @@ impl generated_code::Context for RV32IsleContext<'_, '_, MInst, Riscv32Backend> 
     }
 
     fn ty_supported(&mut self, ty: Type) -> Option<Type> {
-        let lane_type = ty.lane_type();
+        // let lane_type = ty.lane_type();
         let supported = match ty {
             // Scalar integers are always supported
             ty if ty.is_int() => true,
@@ -100,7 +100,7 @@ impl generated_code::Context for RV32IsleContext<'_, '_, MInst, Riscv32Backend> 
             let tmp = self.temp_writable_reg(I64);
             self.emit(&MInst::Load {
                 rd: tmp,
-                op: LoadOP::Ld,
+                op: LoadOP::Lw,
                 flags: MemFlags::trusted(),
                 from: AMode::FPOffset(8),
             });
@@ -114,26 +114,26 @@ impl generated_code::Context for RV32IsleContext<'_, '_, MInst, Riscv32Backend> 
         CondBrTarget::Label(label)
     }
 
-    fn imm12_and(&mut self, imm: Imm12, x: u64) -> Imm12 {
+    fn imm12_and(&mut self, imm: Imm12, x: u32) -> Imm12 {
         Imm12::from_i16(imm.as_i16() & (x as i16))
     }
 
-    fn i64_generate_imm(&mut self, imm: i64) -> Option<(Imm20, Imm12)> {
-        MInst::generate_imm(imm as u64)
+    fn i32_generate_imm(&mut self, imm: i32) -> Option<(Imm20, Imm12)> {
+        MInst::generate_imm(imm as u32)
     }
 
-    fn i64_shift_for_lui(&mut self, imm: i64) -> Option<(u64, Imm12)> {
+    fn i32_shift_for_lui(&mut self, imm: i32) -> Option<(u32, Imm12)> {
         let trailing = imm.trailing_zeros();
         if trailing < 12 {
             return None;
         }
 
         let shift = Imm12::from_i16(trailing as i16 - 12);
-        let base = (imm as u64) >> trailing;
+        let base = (imm as u32) >> trailing;
         Some((base, shift))
     }
 
-    fn i64_shift(&mut self, imm: i64) -> Option<(i64, Imm12)> {
+    fn i32_shift(&mut self, imm: i32) -> Option<(i32, Imm12)> {
         let trailing = imm.trailing_zeros();
         // We can do without this condition but in this case there is no need to go further
         if trailing == 0 {
@@ -150,12 +150,12 @@ impl generated_code::Context for RV32IsleContext<'_, '_, MInst, Riscv32Backend> 
         self.lower_ctx.emit(arg0.clone());
     }
     #[inline]
-    fn imm12_from_u64(&mut self, arg0: u64) -> Option<Imm12> {
-        Imm12::maybe_from_u64(arg0)
+    fn imm12_from_u32(&mut self, arg0: u32) -> Option<Imm12> {
+        Imm12::maybe_from_u32(arg0)
     }
     #[inline]
-    fn imm12_from_i64(&mut self, arg0: i64) -> Option<Imm12> {
-        Imm12::maybe_from_i64(arg0)
+    fn imm12_from_i32(&mut self, arg0: i32) -> Option<Imm12> {
+        Imm12::maybe_from_i32(arg0)
     }
     #[inline]
     fn imm12_is_zero(&mut self, imm: Imm12) -> Option<()> {
@@ -167,12 +167,12 @@ impl generated_code::Context for RV32IsleContext<'_, '_, MInst, Riscv32Backend> 
     }
 
     #[inline]
-    fn imm20_from_u64(&mut self, arg0: u64) -> Option<Imm20> {
-        Imm20::maybe_from_u64(arg0)
+    fn imm20_from_u32(&mut self, arg0: u32) -> Option<Imm20> {
+        Imm20::maybe_from_u32(arg0)
     }
     #[inline]
-    fn imm20_from_i64(&mut self, arg0: i64) -> Option<Imm20> {
-        Imm20::maybe_from_i64(arg0)
+    fn imm20_from_i32(&mut self, arg0: i32) -> Option<Imm20> {
+        Imm20::maybe_from_i32(arg0)
     }
     #[inline]
     fn imm20_is_zero(&mut self, imm: Imm20) -> Option<()> {
@@ -184,11 +184,11 @@ impl generated_code::Context for RV32IsleContext<'_, '_, MInst, Riscv32Backend> 
     }
 
     #[inline]
-    fn imm5_from_u64(&mut self, arg0: u64) -> Option<Imm5> {
-        Imm5::maybe_from_i8(i8::try_from(arg0 as i64).ok()?)
+    fn imm5_from_u32(&mut self, arg0: u32) -> Option<Imm5> {
+        Imm5::maybe_from_i8(i8::try_from(arg0 as i32).ok()?)
     }
     #[inline]
-    fn imm5_from_i64(&mut self, arg0: i64) -> Option<Imm5> {
+    fn imm5_from_i32(&mut self, arg0: i32) -> Option<Imm5> {
         Imm5::maybe_from_i8(i8::try_from(arg0).ok()?)
     }
     #[inline]
@@ -204,7 +204,7 @@ impl generated_code::Context for RV32IsleContext<'_, '_, MInst, Riscv32Backend> 
         UImm5::maybe_from_u8(arg0)
     }
     #[inline]
-    fn uimm5_from_u64(&mut self, arg0: u64) -> Option<UImm5> {
+    fn uimm5_from_u32(&mut self, arg0: u32) -> Option<UImm5> {
         arg0.try_into().ok().and_then(UImm5::maybe_from_u8)
     }
     #[inline]
@@ -230,16 +230,12 @@ impl generated_code::Context for RV32IsleContext<'_, '_, MInst, Riscv32Backend> 
         }
     }
     #[inline]
-    fn imm_from_bits(&mut self, val: u64) -> Imm12 {
-        Imm12::maybe_from_u64(val).unwrap()
+    fn imm_from_bits(&mut self, val: u32) -> Imm12 {
+        Imm12::maybe_from_u32(val).unwrap()
     }
     #[inline]
-    fn imm_from_neg_bits(&mut self, val: i64) -> Imm12 {
-        Imm12::maybe_from_i64(val).unwrap()
-    }
-
-    fn frm_bits(&mut self, frm: &FRM) -> UImm5 {
-        UImm5::maybe_from_u8(frm.bits()).unwrap()
+    fn imm_from_neg_bits(&mut self, val: i32) -> Imm12 {
+        Imm12::maybe_from_i32(val).unwrap()
     }
 
     fn u8_as_i32(&mut self, x: u8) -> i32 {
@@ -247,17 +243,17 @@ impl generated_code::Context for RV32IsleContext<'_, '_, MInst, Riscv32Backend> 
     }
 
     fn imm12_const(&mut self, val: i32) -> Imm12 {
-        if let Some(res) = Imm12::maybe_from_i64(val as i64) {
+        if let Some(res) = Imm12::maybe_from_i32(val) {
             res
         } else {
             panic!("Unable to make an Imm12 value from {val}")
         }
     }
     fn imm12_const_add(&mut self, val: i32, add: i32) -> Imm12 {
-        Imm12::maybe_from_i64((val + add) as i64).unwrap()
+        Imm12::maybe_from_i32(val + add).unwrap()
     }
     fn imm12_add(&mut self, val: Imm12, add: i32) -> Option<Imm12> {
-        Imm12::maybe_from_i64((i32::from(val.as_i16()) + add).into())
+        Imm12::maybe_from_i32((i32::from(val.as_i16()) + add).into())
     }
 
     fn has_v(&mut self) -> bool {
@@ -300,22 +296,22 @@ impl generated_code::Context for RV32IsleContext<'_, '_, MInst, Riscv32Backend> 
         self.backend.isa_flags.has_zicond()
     }
 
-    fn gen_reg_offset_amode(&mut self, base: Reg, offset: i64) -> AMode {
+    fn gen_reg_offset_amode(&mut self, base: Reg, offset: i32) -> AMode {
         AMode::RegOffset(base, offset)
     }
 
-    fn gen_sp_offset_amode(&mut self, offset: i64) -> AMode {
+    fn gen_sp_offset_amode(&mut self, offset: i32) -> AMode {
         AMode::SPOffset(offset)
     }
 
-    fn gen_fp_offset_amode(&mut self, offset: i64) -> AMode {
+    fn gen_fp_offset_amode(&mut self, offset: i32) -> AMode {
         AMode::FPOffset(offset)
     }
 
-    fn gen_stack_slot_amode(&mut self, ss: StackSlot, offset: i64) -> AMode {
+    fn gen_stack_slot_amode(&mut self, ss: StackSlot, offset: i32) -> AMode {
         // Offset from beginning of stackslot area.
-        let stack_off = self.lower_ctx.abi().sized_stackslot_offsets()[ss] as i64;
-        let sp_off: i64 = stack_off + offset;
+        let stack_off = self.lower_ctx.abi().sized_stackslot_offsets()[ss] as i32;
+        let sp_off: i32 = stack_off + offset;
         AMode::SlotOffset(sp_off)
     }
 
@@ -334,7 +330,7 @@ impl generated_code::Context for RV32IsleContext<'_, '_, MInst, Riscv32Backend> 
     fn store_op(&mut self, ty: Type) -> StoreOP {
         StoreOP::from_type(ty)
     }
-    fn load_ext_name(&mut self, name: ExternalName, offset: i64) -> Reg {
+    fn load_ext_name(&mut self, name: ExternalName, offset: i32) -> Reg {
         let tmp = self.temp_writable_reg(I64);
         self.emit(&MInst::LoadExtName {
             rd: tmp,
@@ -349,12 +345,9 @@ impl generated_code::Context for RV32IsleContext<'_, '_, MInst, Riscv32Backend> 
         let i = self
             .lower_ctx
             .abi()
-            .sized_stackslot_addr(slot, i64::from(offset) as u32, result);
+            .sized_stackslot_addr(slot, i32::from(offset) as u32, result);
         self.emit(&i);
         result.to_reg()
-    }
-    fn atomic_amo(&mut self) -> AMO {
-        AMO::SeqCst
     }
 
     fn lower_br_table(&mut self, index: Reg, targets: &[MachLabel]) -> Unit {

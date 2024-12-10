@@ -181,7 +181,7 @@ impl Inst {
                 x.emit(sink, emit_info, state)
             }
             &Inst::RawData { ref data } => {
-                // Right now we only put a u32 or u64 in this instruction.
+                // Right now we only put a u32 or u32 in this instruction.
                 // It is not very long, no need to check if need `emit_island`.
                 // If data is very long , this is a bug because RawData is typically
                 // use to load some data and rely on some position in the code stream.
@@ -273,7 +273,7 @@ impl Inst {
             } => {
                 let base = from.get_base_register();
                 let offset = from.get_offset_with_state(state);
-                let offset_imm12 = Imm12::maybe_from_i64(offset);
+                let offset_imm12 = Imm12::maybe_from_i32(offset);
                 let label = from.get_label_with_sink(sink);
 
                 let (addr, imm12) = match (base, offset_imm12, label) {
@@ -329,7 +329,7 @@ impl Inst {
             &Inst::Store { op, src, flags, to } => {
                 let base = to.get_base_register();
                 let offset = to.get_offset_with_state(state);
-                let offset_imm12 = Imm12::maybe_from_i64(offset);
+                let offset_imm12 = Imm12::maybe_from_i32(offset);
 
                 let (addr, imm12) = match (base, offset_imm12) {
                     // If the offset fits into an imm12 we can directly encode it.
@@ -588,7 +588,7 @@ impl Inst {
                 // Check if the index passed in is larger than the number of jumptable
                 // entries that we have. If it is, we fallthrough to a jump into the
                 // default block.
-                Inst::load_constant_u32(tmp2, targets.len() as u64)
+                Inst::load_constant_u32(tmp2, targets.len() as u32)
                     .iter()
                     .for_each(|i| i.emit(sink, emit_info, state));
                 Inst::CondBr {
@@ -685,7 +685,7 @@ impl Inst {
             &Inst::LoadAddr { rd, mem } => {
                 let base = mem.get_base_register();
                 let offset = mem.get_offset_with_state(state);
-                let offset_imm12 = Imm12::maybe_from_i64(offset);
+                let offset_imm12 = Imm12::maybe_from_i32(offset);
 
                 match (mem, base, offset_imm12) {
                     (_, Some(rs), Some(imm12)) => {
@@ -698,7 +698,7 @@ impl Inst {
                         .emit(sink, emit_info, state);
                     }
                     (_, Some(rs), None) => {
-                        let mut insts = Inst::load_constant_u32(rd, offset as u64);
+                        let mut insts = Inst::load_constant_u32(rd, offset as u32);
                         insts.push(Inst::AluRRR {
                             alu_op: AluOPRRR::Add,
                             rd,
@@ -1282,10 +1282,10 @@ impl Inst {
                 tmp: guard_size_tmp,
             } => {
                 let step = writable_spilltmp_reg();
-                Inst::load_constant_u32(step, (guard_size as u64) * (probe_count as u64))
+                Inst::load_constant_u32(step, (guard_size) * (probe_count))
                     .iter()
                     .for_each(|i| i.emit(sink, emit_info, state));
-                Inst::load_constant_u32(guard_size_tmp, guard_size as u64)
+                Inst::load_constant_u32(guard_size_tmp, guard_size)
                     .iter()
                     .for_each(|i| i.emit(sink, emit_info, state));
 
@@ -1374,11 +1374,11 @@ fn return_call_emit_impl<T>(
 ) {
     let sp_to_fp_offset = {
         let frame_layout = state.frame_layout();
-        i64::from(
+        (
             frame_layout.clobber_size
                 + frame_layout.fixed_frame_storage_size
-                + frame_layout.outgoing_args_size,
-        )
+                + frame_layout.outgoing_args_size
+        ) as i32
     };
 
     let mut clobber_offset = sp_to_fp_offset - 8;
@@ -1402,7 +1402,7 @@ fn return_call_emit_impl<T>(
     }
 
     // Restore the link register and frame pointer
-    let setup_area_size = i64::from(state.frame_layout().setup_area_size);
+    let setup_area_size = state.frame_layout().setup_area_size as i32;
     if setup_area_size > 0 {
         Inst::gen_load(
             writable_link_reg(),
@@ -1424,7 +1424,7 @@ fn return_call_emit_impl<T>(
     // If we over-allocated the incoming args area in the prologue, resize down to what the callee
     // is expecting.
     let incoming_args_diff =
-        i64::from(state.frame_layout().tail_args_size - info.new_stack_arg_size);
+        (state.frame_layout().tail_args_size - info.new_stack_arg_size) as i32;
 
     // Increment SP all at once
     let sp_increment = sp_to_fp_offset + setup_area_size + incoming_args_diff;

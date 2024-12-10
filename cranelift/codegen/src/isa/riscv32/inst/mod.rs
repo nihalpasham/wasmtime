@@ -132,7 +132,7 @@ impl Inst {
     }
 
     /// Immediates can be loaded using lui and addi instructions.
-    fn load_const_imm(rd: Writable<Reg>, value: u64) -> Option<SmallInstVec<Inst>> {
+    fn load_const_imm(rd: Writable<Reg>, value: u32) -> Option<SmallInstVec<Inst>> {
         Inst::generate_imm(value).map(|(imm20, imm12)| {
             let mut insts = SmallVec::new();
 
@@ -161,7 +161,7 @@ impl Inst {
         })
     }
 
-    pub(crate) fn load_constant_u32(rd: Writable<Reg>, value: u64) -> SmallInstVec<Inst> {
+    pub(crate) fn load_constant_u32(rd: Writable<Reg>, value: u32) -> SmallInstVec<Inst> {
         let insts = Inst::load_const_imm(rd, value);
         insts.unwrap_or_else(|| {
             smallvec![Inst::LoadInlineConst {
@@ -175,9 +175,9 @@ impl Inst {
     pub(crate) fn construct_auipc_and_jalr(
         link: Option<Writable<Reg>>,
         tmp: Writable<Reg>,
-        offset: i64,
+        offset: i32,
     ) -> [Inst; 2] {
-        Inst::generate_imm(offset as u64)
+        Inst::generate_imm(offset as u32)
             .map(|(imm20, imm12)| {
                 let a = Inst::Auipc {
                     rd: tmp,
@@ -1072,7 +1072,7 @@ pub enum LabelUse {
 }
 
 impl MachInstLabelUse for LabelUse {
-    /// Alignment for veneer code. Every Riscv64 instruction must be
+    /// Alignment for veneer code. Every Riscv32 instruction must be
     /// 4-byte-aligned.
     const ALIGN: CodeOffset = 4;
 
@@ -1109,11 +1109,11 @@ impl MachInstLabelUse for LabelUse {
     fn patch(self, buffer: &mut [u8], use_offset: CodeOffset, label_offset: CodeOffset) {
         assert!(use_offset % 2 == 0);
         assert!(label_offset % 2 == 0);
-        let offset = (label_offset as i64) - (use_offset as i64);
+        let offset = (label_offset as i32) - (use_offset as i32);
 
         // re-check range
         assert!(
-            offset >= -(self.max_neg_range() as i64) && offset <= (self.max_pos_range() as i64),
+            offset >= -(self.max_neg_range() as i32) && offset <= (self.max_pos_range() as i32),
             "{self:?} offset '{offset}' use_offset:'{use_offset}' label_offset:'{label_offset}'  must not exceed max range.",
         );
         self.patch_raw_offset(buffer, offset);
@@ -1174,13 +1174,13 @@ impl MachInstLabelUse for LabelUse {
 
 impl LabelUse {
     #[allow(dead_code)] // in case it's needed in the future
-    fn offset_in_range(self, offset: i64) -> bool {
-        let min = -(self.max_neg_range() as i64);
-        let max = self.max_pos_range() as i64;
+    fn offset_in_range(self, offset: i32) -> bool {
+        let min = -(self.max_neg_range() as i32);
+        let max = self.max_pos_range() as i32;
         offset >= min && offset <= max
     }
 
-    fn patch_raw_offset(self, buffer: &mut [u8], offset: i64) {
+    fn patch_raw_offset(self, buffer: &mut [u8], offset: i32) {
         let insn = match self {
             LabelUse::RVCJump => u16::from_le_bytes(buffer[..2].try_into().unwrap()) as u32,
             _ => u32::from_le_bytes(buffer[..4].try_into().unwrap()),
@@ -1197,7 +1197,7 @@ impl LabelUse {
             }
             LabelUse::PCRel32 => {
                 let insn2 = u32::from_le_bytes([buffer[4], buffer[5], buffer[6], buffer[7]]);
-                Inst::generate_imm(offset as u64)
+                Inst::generate_imm(offset as u32)
                     .map(|(imm20, imm12)| {
                         // Encode the OR-ed-in value with zero_reg(). The
                         // register parameter must be in the original

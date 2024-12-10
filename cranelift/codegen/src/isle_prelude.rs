@@ -202,6 +202,12 @@ macro_rules! isle_common_prelude_methods {
         }
 
         #[inline]
+        fn i32_sextend_u32(&mut self, ty: Type, x: u32) -> i32 {
+            let shift_amt = std::cmp::max(0, 32 - ty.bits());
+            ((x as i32) << shift_amt) >> shift_amt
+        }
+        
+        #[inline]
         fn i64_sextend_u64(&mut self, ty: Type, x: u64) -> i64 {
             let shift_amt = std::cmp::max(0, 64 - ty.bits());
             ((x as i64) << shift_amt) >> shift_amt
@@ -552,6 +558,13 @@ macro_rules! isle_common_prelude_methods {
                 I64 => Some(ty),
                 _ => None,
             }
+        }
+
+        #[inline]
+        fn u32_from_imm64(&mut self, imm: Imm64) -> u32 {
+            let imm_bits = imm.bits();
+            assert!(imm_bits >= i32::MIN && imm_bits <= i32::MAX);
+            imm_bits as u32
         }
 
         #[inline]

@@ -16,11 +16,11 @@ impl Imm12 {
     pub(crate) const ZERO: Self = Self { bits: 0 };
     pub(crate) const ONE: Self = Self { bits: 1 };
 
-    pub fn maybe_from_u64(val: u64) -> Option<Imm12> {
-        Self::maybe_from_i64(val as i64)
+    pub fn maybe_from_u32(val: u32) -> Option<Imm12> {
+        Self::maybe_from_i32(val as i32)
     }
 
-    pub fn maybe_from_i64(val: i64) -> Option<Imm12> {
+    pub fn maybe_from_i32(val: i32) -> Option<Imm12> {
         if val >= -2048 && val <= 2047 {
             Some(Imm12 {
                 bits: val as u16 & 0xfff,
@@ -49,8 +49,8 @@ impl Imm12 {
     }
 }
 
-impl Into<i64> for Imm12 {
-    fn into(self) -> i64 {
+impl Into<i32> for Imm12 {
+    fn into(self) -> i32 {
         self.as_i16().into()
     }
 }
@@ -73,11 +73,11 @@ pub struct Imm20 {
 impl Imm20 {
     pub(crate) const ZERO: Self = Self { bits: 0 };
 
-    pub fn maybe_from_u64(val: u64) -> Option<Imm20> {
-        Self::maybe_from_i64(val as i64)
+    pub fn maybe_from_u32(val: u32) -> Option<Imm20> {
+        Self::maybe_from_i32(val as i32)
     }
 
-    pub fn maybe_from_i64(val: i64) -> Option<Imm20> {
+    pub fn maybe_from_i32(val: i32) -> Option<Imm20> {
         if val >= -(0x7_ffff + 1) && val <= 0x7_ffff {
             Some(Imm20 { bits: val as u32 })
         } else {
@@ -299,15 +299,22 @@ impl Display for Uimm2 {
 }
 
 impl Inst {
-    pub(crate) fn imm_min() -> i64 {
-        let imm20_max: i64 = (1 << 19) << 12;
-        let imm12_max = 1 << 11;
-        -imm20_max - imm12_max
+    pub(crate) fn imm_min() -> i32 {
+        // RV32I immediate minimum value: depends on the format.
+        // For a 12-bit signed immediate (common in I-type, S-type, B-type):
+        let _imm12_min = -(1 << 11); // -2048
+        // For a 20-bit signed immediate (used in U-type):
+        let imm20_min = -(1 << 19); // -524288
+        imm20_min // Change to `imm12_min` if your focus is 12-bit immediates
     }
-    pub(crate) fn imm_max() -> i64 {
-        let imm20_max: i64 = ((1 << 19) - 1) << 12;
-        let imm12_max = (1 << 11) - 1;
-        imm20_max + imm12_max
+    
+    pub(crate) fn imm_max() -> i32 {
+        // RV32I immediate maximum value: depends on the format.
+        // For a 12-bit signed immediate (common in I-type, S-type, B-type):
+        let _imm12_max = (1 << 11) - 1; // 2047
+        // For a 20-bit signed immediate (used in U-type):
+        let imm20_max = (1 << 19) - 1; // 524287
+        imm20_max // Change to `imm12_max` if your focus is 12-bit immediates
     }
 
     /// An imm20 immediate and an Imm12 immediate can generate a 32-bit immediate.
@@ -315,17 +322,17 @@ impl Inst {
     ///
     /// `value` must be between `imm_min()` and `imm_max()`, or else
     /// this helper returns `None`.
-    pub(crate) fn generate_imm(value: u64) -> Option<(Imm20, Imm12)> {
-        if let Some(imm12) = Imm12::maybe_from_u64(value) {
+    pub(crate) fn generate_imm(value: u32) -> Option<(Imm20, Imm12)> {
+        if let Some(imm12) = Imm12::maybe_from_u32(value) {
             // can be load using single imm12.
             return Some((Imm20::ZERO, imm12));
         }
-        let value = value as i64;
+        let value = value as i32;
         if !(value >= Self::imm_min() && value <= Self::imm_max()) {
             // not in range, return None.
             return None;
         }
-        const MOD_NUM: i64 = 4096;
+        const MOD_NUM: i32 = 4096;
         let (imm20, imm12) = if value > 0 {
             let mut imm20 = value / MOD_NUM;
             let mut imm12 = value % MOD_NUM;
@@ -362,12 +369,12 @@ mod test {
     fn test_imm12() {
         let x = Imm12::ZERO;
         assert_eq!(0, x.bits());
-        Imm12::maybe_from_u64(0xffff_ffff_ffff_ffff).unwrap();
+        Imm12::maybe_from_u32(0xffff_ffff_ffff_ffff).unwrap();
     }
 
     #[test]
     fn imm20_and_imm12() {
-        assert!(Inst::imm_max() == (i32::MAX - 2048) as i64);
-        assert!(Inst::imm_min() == i32::MIN as i64 - 2048);
+        assert!(Inst::imm_max() == (i32::MAX - 2048));
+        assert!(Inst::imm_min() == (i32::MIN - 2048));
     }
 }

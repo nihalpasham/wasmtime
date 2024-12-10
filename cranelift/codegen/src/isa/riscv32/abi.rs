@@ -243,7 +243,7 @@ impl ABIMachineSpec for Riscv32MachineDeps {
         imm: u32,
     ) -> SmallInstVec<Inst> {
         let mut insts = SmallInstVec::new();
-        if let Some(imm12) = Imm12::maybe_from_u64(imm as u64) {
+        if let Some(imm12) = Imm12::maybe_from_u32(imm) {
             insts.push(Inst::AluRRImm12 {
                 alu_op: AluOPRRI::Addi,
                 rd: into_reg,
@@ -272,12 +272,12 @@ impl ABIMachineSpec for Riscv32MachineDeps {
     }
 
     fn gen_load_base_offset(into_reg: Writable<Reg>, base: Reg, offset: i32, ty: Type) -> Inst {
-        let mem = AMode::RegOffset(base, offset as i64);
+        let mem = AMode::RegOffset(base, offset);
         Inst::gen_load(into_reg, mem, ty, MemFlags::trusted())
     }
 
     fn gen_store_base_offset(base: Reg, offset: i32, from_reg: Reg, ty: Type) -> Inst {
-        let mem = AMode::RegOffset(base, offset as i64);
+        let mem = AMode::RegOffset(base, offset);
         Inst::gen_store(mem, from_reg, ty, MemFlags::trusted())
     }
 
@@ -288,7 +288,7 @@ impl ABIMachineSpec for Riscv32MachineDeps {
             return insts;
         }
 
-        if let Some(imm) = Imm12::maybe_from_i64(amount as i64) {
+        if let Some(imm) = Imm12::maybe_from_i32(amount) {
             insts.push(Inst::AluRRImm12 {
                 alu_op: AluOPRRI::Addi,
                 rd: writable_stack_reg(),
@@ -388,7 +388,7 @@ impl ABIMachineSpec for Riscv32MachineDeps {
     }
 
     fn gen_probestack(insts: &mut SmallInstVec<Self::I>, frame_size: u32) {
-        insts.extend(Inst::load_constant_u32(writable_a0(), frame_size as u64));
+        insts.extend(Inst::load_constant_u32(writable_a0(), frame_size));
         let mut info = CallInfo::empty(
             ExternalName::LibCall(LibCall::Probestack),
             CallConv::SystemV,
@@ -426,7 +426,7 @@ impl ABIMachineSpec for Riscv32MachineDeps {
                 ));
                 insts.push(Inst::gen_load(
                     writable_fp_reg(),
-                    AMode::SPOffset(i64::from(incoming_args_diff)),
+                    AMode::SPOffset(incoming_args_diff as i32),
                     I32,
                     MemFlags::trusted(),
                 ));
@@ -473,7 +473,7 @@ impl ABIMachineSpec for Riscv32MachineDeps {
                     RegClass::Vector => unimplemented!("Vector Clobber Saves"),
                 };
                 insts.push(Inst::gen_store(
-                    AMode::SPOffset((stack_size - cur_offset) as i64),
+                    AMode::SPOffset((stack_size - cur_offset) as i32),
                     Reg::from(reg.to_reg()),
                     ty,
                     MemFlags::trusted(),
@@ -515,7 +515,7 @@ impl ABIMachineSpec for Riscv32MachineDeps {
             };
             insts.push(Inst::gen_load(
                 reg.map(Reg::from),
-                AMode::SPOffset(i64::from(stack_size - cur_offset)),
+                AMode::SPOffset((stack_size - cur_offset) as i32),
                 ty,
                 MemFlags::trusted(),
             ));
@@ -565,7 +565,7 @@ impl ABIMachineSpec for Riscv32MachineDeps {
         let arg1 = Writable::from_reg(x_reg(11));
         let arg2 = Writable::from_reg(x_reg(12));
         let tmp = alloc_tmp(Self::word_type());
-        insts.extend(Inst::load_constant_u32(tmp, size as u64).into_iter());
+        insts.extend(Inst::load_constant_u32(tmp, size as u32).into_iter());
         insts.push(Inst::Call {
             info: Box::new(CallInfo {
                 dest: ExternalName::LibCall(LibCall::Memcpy),
@@ -596,13 +596,13 @@ impl ABIMachineSpec for Riscv32MachineDeps {
     fn get_number_of_spillslots_for_value(
         rc: RegClass,
         _target_vector_bytes: u32,
-        isa_flags: &RiscvFlags,
+        _isa_flags: &RiscvFlags,
     ) -> u32 {
         // We allocate in terms of 8-byte slots.
         match rc {
             RegClass::Int => 1,
             RegClass::Float => 1,
-            RegClass::Vector => (isa_flags.min_vec_reg_size() / 8) as u32,
+            RegClass::Vector => unimplemented!()
         }
     }
 
@@ -939,7 +939,7 @@ impl Riscv32MachineDeps {
         // reload it for each probe. It's worth loading this as a negative and
         // using an `add` instruction since we have compressed versions of `add`
         // but not the `sub` instruction.
-        insts.extend(Inst::load_constant_u32(tmp, (-(guard_size as i64)) as u64));
+        insts.extend(Inst::load_constant_u32(tmp, (-(guard_size as i32)) as u32));
 
         for _ in 0..probe_count {
             insts.push(Inst::AluRRR {

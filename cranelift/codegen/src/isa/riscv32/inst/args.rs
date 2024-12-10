@@ -75,12 +75,12 @@ newtype_of_reg!(VReg, WritableVReg, |reg| reg.class() == RegClass::Vector);
 pub enum AMode {
     /// Arbitrary offset from a register. Converted to generation of large
     /// offsets with multiple instructions as necessary during code emission.
-    RegOffset(Reg, i64),
+    RegOffset(Reg, i32),
     /// Offset from the stack pointer.
-    SPOffset(i64),
+    SPOffset(i32),
 
     /// Offset from the frame pointer.
-    FPOffset(i64),
+    FPOffset(i32),
 
     /// Offset into the slot area of the stack, which lies just above the
     /// outgoing argument area that's setup by the function prologue.
@@ -92,10 +92,10 @@ pub enum AMode {
     /// The standard ABI is in charge of handling this (by emitting the
     /// adjustment meta-instructions). See the diagram in the documentation
     /// for [crate::isa::aarch64::abi](the ABI module) for more details.
-    SlotOffset(i64),
+    SlotOffset(i32),
 
     /// Offset into the argument area.
-    IncomingArg(i64),
+    IncomingArg(i32),
 
     /// A reference to a constant which is placed outside of the function's
     /// body, typically at the end.
@@ -131,10 +131,10 @@ impl AMode {
         }
     }
 
-    pub(crate) fn get_offset_with_state(&self, state: &EmitState) -> i64 {
+    pub(crate) fn get_offset_with_state(&self, state: &EmitState) -> i32 {
         match self {
             &AMode::SlotOffset(offset) => {
-                offset + i64::from(state.frame_layout().outgoing_args_size)
+                offset + state.frame_layout().outgoing_args_size as i32
             }
 
             // Compute the offset into the incoming argument area relative to SP
@@ -145,7 +145,7 @@ impl AMode {
                     + frame_layout.clobber_size
                     + frame_layout.fixed_frame_storage_size
                     + frame_layout.outgoing_args_size;
-                i64::from(sp_offset) - offset
+                sp_offset as i32 - offset
             }
 
             &AMode::RegOffset(_, offset) => offset,
@@ -201,10 +201,10 @@ impl Into<AMode> for StackAMode {
     fn into(self) -> AMode {
         match self {
             StackAMode::IncomingArg(offset, stack_args_size) => {
-                AMode::IncomingArg(i64::from(stack_args_size) - offset)
+                AMode::IncomingArg(stack_args_size as i32 - offset as i32)
             }
-            StackAMode::OutgoingArg(offset) => AMode::SPOffset(offset),
-            StackAMode::Slot(offset) => AMode::SlotOffset(offset),
+            StackAMode::OutgoingArg(offset) => AMode::SPOffset(offset as i32),
+            StackAMode::Slot(offset) => AMode::SlotOffset(offset as i32),
         }
     }
 }
@@ -485,7 +485,7 @@ impl LoadOP {
         }
     }
 
-    pub(crate) fn size(&self) -> i64 {
+    pub(crate) fn size(&self) -> i32 {
         match self {
             Self::Lb | Self::Lbu => 1,
             Self::Lh | Self::Lhu => 2,
@@ -529,7 +529,7 @@ impl StoreOP {
         }
     }
 
-    pub(crate) fn size(&self) -> i64 {
+    pub(crate) fn size(&self) -> i32 {
         match self {
             Self::Sb => 1,
             Self::Sh => 2,
