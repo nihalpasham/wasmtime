@@ -152,7 +152,7 @@
 //!   but is conservative.
 //!
 //! - The fixup list can interact with island emission to create
-//!   "quadratic island behvior". In a little more detail, one can hit
+//!   "quadratic island behavior". In a little more detail, one can hit
 //!   this behavior by having some pending fixups (forward label
 //!   references) with long-range label-use kinds, and some others
 //!   with shorter-range references that nonetheless still are pending
@@ -2035,6 +2035,10 @@ impl<I: VCodeInst> TextSectionBuilder for MachTextSectionBuilder<I> {
 
     fn force_veneers(&mut self) {
         self.force_veneers = ForceVeneers::Yes;
+    }
+
+    fn write(&mut self, offset: u64, data: &[u8]) {
+        self.buf.data[offset.try_into().unwrap()..][..data.len()].copy_from_slice(data);
     }
 
     fn finish(&mut self, ctrl_plane: &mut ControlPlane) -> Vec<u8> {

@@ -1,6 +1,9 @@
 use crate::abi::{self, align_to, scratch, LocalSlot};
-use crate::codegen::{CodeGenContext, FuncEnv};
-use crate::isa::reg::{writable, Reg, WritableReg};
+use crate::codegen::{CodeGenContext, Emission, FuncEnv};
+use crate::isa::{
+    reg::{writable, Reg, WritableReg},
+    CallingConvention,
+};
 use cranelift_codegen::{
     binemit::CodeOffset,
     ir::{Endianness, LibCall, MemFlags, RelSourceLoc, SourceLoc, UserExternalNameRef},
@@ -584,7 +587,11 @@ pub(crate) trait MacroAssembler {
     fn address_at_reg(&self, reg: Reg, offset: u32) -> Self::Address;
 
     /// Emit a function call to either a local or external function.
-    fn call(&mut self, stack_args_size: u32, f: impl FnMut(&mut Self) -> CalleeKind) -> u32;
+    fn call(
+        &mut self,
+        stack_args_size: u32,
+        f: impl FnMut(&mut Self) -> (CalleeKind, CallingConvention),
+    ) -> u32;
 
     /// Get stack pointer offset.
     fn sp_offset(&self) -> SPOffset;
@@ -744,11 +751,11 @@ pub(crate) trait MacroAssembler {
     fn float_neg(&mut self, dst: WritableReg, size: OperandSize);
 
     /// Perform a floating point floor operation.
-    fn float_round<F: FnMut(&mut FuncEnv<Self::Ptr>, &mut CodeGenContext, &mut Self)>(
+    fn float_round<F: FnMut(&mut FuncEnv<Self::Ptr>, &mut CodeGenContext<Emission>, &mut Self)>(
         &mut self,
         mode: RoundingMode,
         env: &mut FuncEnv<Self::Ptr>,
-        context: &mut CodeGenContext,
+        context: &mut CodeGenContext<Emission>,
         size: OperandSize,
         fallback: F,
     );
@@ -781,7 +788,7 @@ pub(crate) trait MacroAssembler {
     /// caller from having to deal with the architecture specific constraints
     /// we give this function access to the code generation context, allowing
     /// each implementation to decide the lowering path.
-    fn shift(&mut self, context: &mut CodeGenContext, kind: ShiftKind, size: OperandSize);
+    fn shift(&mut self, context: &mut CodeGenContext<Emission>, kind: ShiftKind, size: OperandSize);
 
     /// Perform division operation.
     /// Division is special in that some architectures have specific
@@ -794,10 +801,10 @@ pub(crate) trait MacroAssembler {
     /// unconstrained binary operation, the caller can decide to use
     /// the `CodeGenContext::i32_binop` or `CodeGenContext::i64_binop`
     /// functions.
-    fn div(&mut self, context: &mut CodeGenContext, kind: DivKind, size: OperandSize);
+    fn div(&mut self, context: &mut CodeGenContext<Emission>, kind: DivKind, size: OperandSize);
 
     /// Calculate remainder.
-    fn rem(&mut self, context: &mut CodeGenContext, kind: RemKind, size: OperandSize);
+    fn rem(&mut self, context: &mut CodeGenContext<Emission>, kind: RemKind, size: OperandSize);
 
     /// Compares `src1` against `src2` for the side effect of setting processor
     /// flags.
@@ -852,7 +859,7 @@ pub(crate) trait MacroAssembler {
 
     /// Count the number of 1 bits in src and put the result in dst. In x64,
     /// this will emit multiple instructions if the `has_popcnt` flag is false.
-    fn popcnt(&mut self, context: &mut CodeGenContext, size: OperandSize);
+    fn popcnt(&mut self, context: &mut CodeGenContext<Emission>, size: OperandSize);
 
     /// Converts an i64 to an i32 by discarding the high 32 bits.
     fn wrap(&mut self, dst: WritableReg, src: Reg);
@@ -1053,5 +1060,5 @@ pub(crate) trait MacroAssembler {
     ///
     /// Note that some platforms require special handling of registers in this
     /// instruction (e.g. x64) so full access to `CodeGenContext` is provided.
-    fn mul_wide(&mut self, context: &mut CodeGenContext, kind: MulWideKind);
+    fn mul_wide(&mut self, context: &mut CodeGenContext<Emission>, kind: MulWideKind);
 }

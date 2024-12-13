@@ -41,14 +41,15 @@ impl HostFunc {
     extern "C" fn entrypoint<T, F, P, R>(
         cx: *mut VMOpaqueContext,
         data: *mut u8,
-        ty: TypeFuncIndex,
-        flags: InstanceFlags,
+        ty: u32,
+        flags: *mut u8,
         memory: *mut VMMemoryDefinition,
         realloc: *mut VMFuncRef,
-        string_encoding: StringEncoding,
+        string_encoding: u8,
         storage: *mut MaybeUninit<ValRaw>,
         storage_len: usize,
-    ) where
+    ) -> bool
+    where
         F: Fn(StoreContextMut<T>, P) -> Result<R>,
         P: ComponentNamedList + Lift + 'static,
         R: ComponentNamedList + Lower + 'static,
@@ -60,11 +61,11 @@ impl HostFunc {
                     instance,
                     types,
                     store,
-                    ty,
-                    flags,
+                    TypeFuncIndex::from_u32(ty),
+                    InstanceFlags::from_raw(flags),
                     memory,
                     realloc,
-                    string_encoding,
+                    StringEncoding::from_u8(string_encoding).unwrap(),
                     core::slice::from_raw_parts_mut(storage, storage_len),
                     |store, args| (*data)(store, args),
                 )
@@ -274,8 +275,8 @@ where
 
 fn validate_inbounds<T: ComponentType>(memory: &[u8], ptr: &ValRaw) -> Result<usize> {
     // FIXME: needs memory64 support
-    let ptr = usize::try_from(ptr.get_u32()).err2anyhow()?;
-    if ptr % usize::try_from(T::ALIGN32).err2anyhow()? != 0 {
+    let ptr = usize::try_from(ptr.get_u32())?;
+    if ptr % usize::try_from(T::ALIGN32)? != 0 {
         bail!("pointer not aligned");
     }
     let end = match ptr.checked_add(T::SIZE32) {
@@ -295,24 +296,19 @@ unsafe fn call_host_and_handle_result<T>(
         &Arc<ComponentTypes>,
         StoreContextMut<'_, T>,
     ) -> Result<()>,
-) {
+) -> bool {
     let cx = VMComponentContext::from_opaque(cx);
     let instance = (*cx).instance();
     let types = (*instance).component_types();
     let raw_store = (*instance).store();
     let mut store = StoreContextMut(&mut *raw_store.cast());
 
-    let res = crate::runtime::vm::catch_unwind_and_longjmp(|| {
+    crate::runtime::vm::catch_unwind_and_record_trap(|| {
         store.0.call_hook(CallHook::CallingHost)?;
         let res = func(instance, types, store.as_context_mut());
         store.0.call_hook(CallHook::ReturningFromHost)?;
         res
-    });
-
-    match res {
-        Ok(()) => {}
-        Err(e) => crate::trap::raise(e),
-    }
+    })
 }
 
 unsafe fn call_host_dynamic<T, F>(
@@ -411,8 +407,8 @@ where
 
 fn validate_inbounds_dynamic(abi: &CanonicalAbiInfo, memory: &[u8], ptr: &ValRaw) -> Result<usize> {
     // FIXME: needs memory64 support
-    let ptr = usize::try_from(ptr.get_u32()).err2anyhow()?;
-    if ptr % usize::try_from(abi.align32).err2anyhow()? != 0 {
+    let ptr = usize::try_from(ptr.get_u32())?;
+    if ptr % usize::try_from(abi.align32)? != 0 {
         bail!("pointer not aligned");
     }
     let end = match ptr.checked_add(usize::try_from(abi.size32).unwrap()) {
@@ -428,14 +424,15 @@ fn validate_inbounds_dynamic(abi: &CanonicalAbiInfo, memory: &[u8], ptr: &ValRaw
 extern "C" fn dynamic_entrypoint<T, F>(
     cx: *mut VMOpaqueContext,
     data: *mut u8,
-    ty: TypeFuncIndex,
-    flags: InstanceFlags,
+    ty: u32,
+    flags: *mut u8,
     memory: *mut VMMemoryDefinition,
     realloc: *mut VMFuncRef,
-    string_encoding: StringEncoding,
+    string_encoding: u8,
     storage: *mut MaybeUninit<ValRaw>,
     storage_len: usize,
-) where
+) -> bool
+where
     F: Fn(StoreContextMut<'_, T>, &[Val], &mut [Val]) -> Result<()> + Send + Sync + 'static,
 {
     let data = data as *const F;
@@ -445,11 +442,11 @@ extern "C" fn dynamic_entrypoint<T, F>(
                 instance,
                 types,
                 store,
-                ty,
-                flags,
+                TypeFuncIndex::from_u32(ty),
+                InstanceFlags::from_raw(flags),
                 memory,
                 realloc,
-                string_encoding,
+                StringEncoding::from_u8(string_encoding).unwrap(),
                 core::slice::from_raw_parts_mut(storage, storage_len),
                 |store, params, results| (*data)(store, params, results),
             )

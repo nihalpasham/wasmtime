@@ -11,7 +11,7 @@ use std::path::Path;
 use wasmparser::WasmFeatures;
 #[cfg(feature = "cache")]
 use wasmtime_cache::CacheConfig;
-use wasmtime_environ::{ConfigTunables, Tunables};
+use wasmtime_environ::{ConfigTunables, TripleExt, Tunables};
 
 #[cfg(feature = "runtime")]
 use crate::memory::MemoryCreator;
@@ -29,6 +29,8 @@ use crate::stack::{StackCreator, StackCreatorProxy};
 #[cfg(feature = "async")]
 use wasmtime_fiber::RuntimeFiberStackCreator;
 
+#[cfg(feature = "runtime")]
+pub use crate::runtime::code_memory::CustomCodeMemory;
 #[cfg(feature = "pooling-allocator")]
 pub use crate::runtime::vm::MpkEnabled;
 #[cfg(all(feature = "incremental-cache", feature = "cranelift"))]
@@ -110,6 +112,16 @@ impl core::hash::Hash for ModuleVersionStrategy {
 ///
 /// The validation of `Config` is deferred until the engine is being built, thus
 /// a problematic config may cause `Engine::new` to fail.
+///
+/// # Defaults
+///
+/// The `Default` trait implementation and the return value from
+/// [`Config::new()`] are the same and represent the default set of
+/// configuration for an engine. The exact set of defaults will differ based on
+/// properties such as enabled Cargo features at compile time and the configured
+/// target (see [`Config::target`]). Configuration options document their
+/// default values and what the conditional value of the default is where
+/// applicable.
 #[derive(Clone)]
 pub struct Config {
     #[cfg(any(feature = "cranelift", feature = "winch"))]
@@ -123,6 +135,8 @@ pub struct Config {
     pub(crate) cache_config: CacheConfig,
     #[cfg(feature = "runtime")]
     pub(crate) mem_creator: Option<Arc<dyn RuntimeMemoryCreator>>,
+    #[cfg(feature = "runtime")]
+    pub(crate) custom_code_memory: Option<Arc<dyn CustomCodeMemory>>,
     pub(crate) allocation_strategy: InstanceAllocationStrategy,
     pub(crate) max_wasm_stack: usize,
     /// Explicitly enabled features via `Config::wasm_*` methods. This is a
@@ -144,7 +158,6 @@ pub struct Config {
     pub(crate) async_support: bool,
     pub(crate) module_version: ModuleVersionStrategy,
     pub(crate) parallel_compilation: bool,
-    pub(crate) memory_init_cow: bool,
     pub(crate) memory_guaranteed_dense_image_size: u64,
     pub(crate) force_memory_init_memfd: bool,
     pub(crate) wmemcheck: bool,
@@ -224,6 +237,8 @@ impl Config {
             profiling_strategy: ProfilingStrategy::None,
             #[cfg(feature = "runtime")]
             mem_creator: None,
+            #[cfg(feature = "runtime")]
+            custom_code_memory: None,
             allocation_strategy: InstanceAllocationStrategy::OnDemand,
             // 512k of stack -- note that this is chosen currently to not be too
             // big, not be too small, and be a good default for most platforms.
@@ -246,7 +261,6 @@ impl Config {
             async_support: false,
             module_version: ModuleVersionStrategy::default(),
             parallel_compilation: !cfg!(miri),
-            memory_init_cow: true,
             memory_guaranteed_dense_image_size: 16 << 20,
             force_memory_init_memfd: false,
             wmemcheck: false,
@@ -268,14 +282,25 @@ impl Config {
         ret
     }
 
-    /// Sets the target triple for the [`Config`].
+    /// Configures the target platform of this [`Config`].
     ///
-    /// By default, the host target triple is used for the [`Config`].
+    /// This method is used to configure the output of compilation in an
+    /// [`Engine`](crate::Engine). This can be used, for example, to
+    /// cross-compile from one platform to another. By default, the host target
+    /// triple is used meaning compiled code is suitable to run on the host.
     ///
-    /// This method can be used to change the target triple.
+    /// Note that the [`Module`](crate::Module) type can only be created if the
+    /// target configured here matches the host. Otherwise if a cross-compile is
+    /// being performed where the host doesn't match the target then
+    /// [`Engine::precompile_module`](crate::Engine::precompile_module) must be
+    /// used instead.
     ///
-    /// Cranelift flags will not be inferred for the given target and any
-    /// existing target-specific Cranelift flags will be cleared.
+    /// Target-specific flags (such as CPU features) will not be inferred by
+    /// default for the target when one is provided here. This means that this
+    /// can also be used, for example, with the host architecture to disable all
+    /// host-inferred feature flags. Configuring target-specific flags can be
+    /// done with [`Config::cranelift_flag_set`] and
+    /// [`Config::cranelift_flag_enable`].
     ///
     /// # Errors
     ///
@@ -764,7 +789,9 @@ impl Config {
     /// Embeddings of Wasmtime are able to build their own custom threading
     /// scheme on top of the core wasm threads proposal, however.
     ///
-    /// This is `true` by default.
+    /// The default value for this option is whether the `threads`
+    /// crate feature of Wasmtime is enabled or not. By default this crate
+    /// feature is enabled.
     ///
     /// [threads]: https://github.com/webassembly/threads
     /// [wasi-threads]: https://github.com/webassembly/wasi-threads
@@ -995,9 +1022,14 @@ impl Config {
     /// Configures whether the WebAssembly component-model [proposal] will
     /// be enabled for compilation.
     ///
-    /// Note that this feature is a work-in-progress and is incomplete.
+    /// This flag can be used to blanket disable all components within Wasmtime.
+    /// Otherwise usage of components requires statically using
+    /// [`Component`](crate::component::Component) instead of
+    /// [`Module`](crate::Module) for example anyway.
     ///
-    /// This is `false` by default.
+    /// The default value for this option is whether the `component-model`
+    /// crate feature of Wasmtime is enabled or not. By default this crate
+    /// feature is enabled.
     ///
     /// [proposal]: https://github.com/webassembly/component-model
     #[cfg(feature = "component-model")]
@@ -1106,6 +1138,27 @@ impl Config {
         self.compiler_config
             .settings
             .insert("opt_level".to_string(), val.to_string());
+        self
+    }
+
+    /// Configures the regalloc algorithm used by the Cranelift code generator.
+    ///
+    /// Cranelift can select any of several register allocator algorithms. Each
+    /// of these algorithms generates correct code, but they represent different
+    /// tradeoffs between compile speed (how expensive the compilation process
+    /// is) and run-time speed (how fast the generated code runs).
+    /// For more information see the documentation of [`RegallocAlgorithm`].
+    ///
+    /// The default value for this is `RegallocAlgorithm::Backtracking`.
+    #[cfg(any(feature = "cranelift", feature = "winch"))]
+    pub fn cranelift_regalloc_algorithm(&mut self, algo: RegallocAlgorithm) -> &mut Self {
+        let val = match algo {
+            RegallocAlgorithm::Backtracking => "backtracking",
+            RegallocAlgorithm::SinglePass => "single_pass",
+        };
+        self.compiler_config
+            .settings
+            .insert("regalloc_algorithm".to_string(), val.to_string());
         self
     }
 
@@ -1286,6 +1339,33 @@ impl Config {
     #[cfg(feature = "async")]
     pub fn with_host_stack(&mut self, stack_creator: Arc<dyn StackCreator>) -> &mut Self {
         self.stack_creator = Some(Arc::new(StackCreatorProxy(stack_creator)));
+        self
+    }
+
+    /// Sets a custom executable-memory publisher.
+    ///
+    /// Custom executable-memory publishers are hooks that allow
+    /// Wasmtime to make certain regions of memory executable when
+    /// loading precompiled modules or compiling new modules
+    /// in-process. In most modern operating systems, memory allocated
+    /// for heap usage is readable and writable by default but not
+    /// executable. To jump to machine code stored in that memory, we
+    /// need to make it executable. For security reasons, we usually
+    /// also make it read-only at the same time, so the executing code
+    /// can't be modified later.
+    ///
+    /// By default, Wasmtime will use the appropriate system calls on
+    /// the host platform for this work. However, it also allows
+    /// plugging in a custom implementation via this configuration
+    /// option. This may be useful on custom or `no_std` platforms,
+    /// for example, especially where virtual memory is not otherwise
+    /// used by Wasmtime (no `signals-and-traps` feature).
+    #[cfg(feature = "runtime")]
+    pub fn with_custom_code_memory(
+        &mut self,
+        custom_code_memory: Option<Arc<dyn CustomCodeMemory>>,
+    ) -> &mut Self {
+        self.custom_code_memory = custom_code_memory;
         self
     }
 
@@ -1475,6 +1555,7 @@ impl Config {
     ///
     /// For 32-bit platforms this value defaults to 10MiB. This means that
     /// bounds checks will be required on 32-bit platforms.
+    #[cfg(feature = "signals-based-traps")]
     pub fn memory_reservation(&mut self, bytes: u64) -> &mut Self {
         self.tunables.memory_reservation = Some(bytes);
         self
@@ -1510,6 +1591,7 @@ impl Config {
     ///   the memory configuration works at runtime.
     ///
     /// The default value for this option is `true`.
+    #[cfg(feature = "signals-based-traps")]
     pub fn memory_may_move(&mut self, enable: bool) -> &mut Self {
         self.tunables.memory_may_move = Some(enable);
         self
@@ -1554,10 +1636,11 @@ impl Config {
     ///
     /// ## Default
     ///
-    /// The default value for this property is 2GiB on 64-bit platforms. This
+    /// The default value for this property is 32MiB on 64-bit platforms. This
     /// allows eliminating almost all bounds checks on loads/stores with an
-    /// immediate offset of less than 2GiB. On 32-bit platforms this defaults to
-    /// 64KiB.
+    /// immediate offset of less than 32MiB. On 32-bit platforms this defaults
+    /// to 64KiB.
+    #[cfg(feature = "signals-based-traps")]
     pub fn memory_guard_size(&mut self, bytes: u64) -> &mut Self {
         self.tunables.memory_guard_size = Some(bytes);
         self
@@ -1647,6 +1730,7 @@ impl Config {
     /// ## Default
     ///
     /// This value defaults to `true`.
+    #[cfg(feature = "signals-based-traps")]
     pub fn guard_before_linear_memory(&mut self, enable: bool) -> &mut Self {
         self.tunables.guard_before_linear_memory = Some(enable);
         self
@@ -1762,8 +1846,9 @@ impl Config {
     /// [`Module::deserialize_file`]: crate::Module::deserialize_file
     /// [`Module`]: crate::Module
     /// [IPI]: https://en.wikipedia.org/wiki/Inter-processor_interrupt
+    #[cfg(feature = "signals-based-traps")]
     pub fn memory_init_cow(&mut self, enable: bool) -> &mut Self {
-        self.memory_init_cow = enable;
+        self.tunables.memory_init_cow = Some(enable);
         self
     }
 
@@ -1874,7 +1959,23 @@ impl Config {
     fn compiler_panicking_wasm_features(&self) -> WasmFeatures {
         #[cfg(any(feature = "cranelift", feature = "winch"))]
         match self.compiler_config.strategy {
-            None | Some(Strategy::Cranelift) => WasmFeatures::empty(),
+            None | Some(Strategy::Cranelift) => {
+                // Pulley is just starting and most errors are because of
+                // unsupported lowerings which is a first-class error. Some
+                // errors are panics though due to unimplemented bits in ABI
+                // code and those causes are listed here.
+                if self.compiler_target().is_pulley() {
+                    return WasmFeatures::SIMD
+                        | WasmFeatures::RELAXED_SIMD
+                        | WasmFeatures::TAIL_CALL
+                        | WasmFeatures::MEMORY64
+                        | WasmFeatures::GC_TYPES;
+                }
+
+                // Other Cranelift backends are either 100% missing or complete
+                // at this time, so no need to further filter.
+                WasmFeatures::empty()
+            }
             Some(Strategy::Winch) => {
                 let mut unsupported = WasmFeatures::GC
                     | WasmFeatures::FUNCTION_REFERENCES
@@ -1956,21 +2057,30 @@ impl Config {
         features
     }
 
+    /// Returns the configured compiler target for this `Config`.
     fn compiler_target(&self) -> target_lexicon::Triple {
+        // If a target is explicitly configured, always use that.
         #[cfg(any(feature = "cranelift", feature = "winch"))]
-        {
-            let host = target_lexicon::Triple::host();
+        if let Some(target) = self.compiler_config.target.clone() {
+            return target;
+        }
 
-            self.compiler_config
-                .target
-                .as_ref()
-                .unwrap_or(&host)
-                .clone()
+        // Without an explicitly configured target the goal is then to select
+        // some default which can reasonably run code on this host. If pulley is
+        // enabled and the host has no support at all in the cranelift/winch
+        // backends then pulley becomes the default target. This means, for
+        // example, that 32-bit platforms will default to running pulley at this
+        // time.
+        let any_compiler_support = cfg!(target_arch = "x86_64")
+            || cfg!(target_arch = "aarch64")
+            || cfg!(target_arch = "riscv64")
+            || cfg!(target_arch = "s390x");
+        if !any_compiler_support && cfg!(feature = "pulley") {
+            return target_lexicon::Triple::pulley_host();
         }
-        #[cfg(not(any(feature = "cranelift", feature = "winch")))]
-        {
-            target_lexicon::Triple::host()
-        }
+
+        // And at this point the target is for sure the host.
+        target_lexicon::Triple::host()
     }
 
     pub(crate) fn validate(&self) -> Result<(Tunables, WasmFeatures)> {
@@ -1995,25 +2105,6 @@ impl Config {
             panic!("should have returned an error by now")
         }
 
-        if features.contains(WasmFeatures::REFERENCE_TYPES)
-            && !features.contains(WasmFeatures::BULK_MEMORY)
-        {
-            bail!("feature 'reference_types' requires 'bulk_memory' to be enabled");
-        }
-        if features.contains(WasmFeatures::THREADS) && !features.contains(WasmFeatures::BULK_MEMORY)
-        {
-            bail!("feature 'threads' requires 'bulk_memory' to be enabled");
-        }
-        if features.contains(WasmFeatures::FUNCTION_REFERENCES)
-            && !features.contains(WasmFeatures::REFERENCE_TYPES)
-        {
-            bail!("feature 'function_references' requires 'reference_types' to be enabled");
-        }
-        if features.contains(WasmFeatures::GC)
-            && !features.contains(WasmFeatures::FUNCTION_REFERENCES)
-        {
-            bail!("feature 'gc' requires 'function_references' to be enabled");
-        }
         #[cfg(feature = "async")]
         if self.async_support && self.max_wasm_stack > self.async_stack_size {
             bail!("max_wasm_stack size cannot exceed the async_stack_size");
@@ -2026,13 +2117,18 @@ impl Config {
             bail!("wmemcheck (memory checker) was requested but is not enabled in this build");
         }
 
-        #[cfg(not(any(feature = "cranelift", feature = "winch")))]
-        let mut tunables = Tunables::default_host();
-        #[cfg(any(feature = "cranelift", feature = "winch"))]
-        let mut tunables = match &self.compiler_config.target.as_ref() {
-            Some(target) => Tunables::default_for_target(target)?,
-            None => Tunables::default_host(),
-        };
+        let mut tunables = Tunables::default_for_target(&self.compiler_target())?;
+
+        // When signals-based traps are disabled use slightly different defaults
+        // for tunables to be more amenable to `MallocMemory`. Note that these
+        // can still be overridden by config options.
+        if !cfg!(feature = "signals-based-traps") {
+            tunables.signals_based_traps = false;
+            tunables.memory_reservation = 0;
+            tunables.memory_guard_size = 0;
+            tunables.memory_reservation_for_growth = 1 << 20; // 1MB
+            tunables.memory_init_cow = false;
+        }
 
         self.tunables.configure(&mut tunables);
 
@@ -2057,6 +2153,13 @@ impl Config {
         } else {
             None
         };
+
+        // These `Config` accessors are disabled at compile time so double-check
+        // the defaults here.
+        if !cfg!(feature = "signals-based-traps") {
+            assert!(!tunables.signals_based_traps);
+            assert!(!tunables.memory_init_cow);
+        }
 
         Ok((tunables, features))
     }
@@ -2149,15 +2252,28 @@ impl Config {
         tunables: &Tunables,
         features: WasmFeatures,
     ) -> Result<(Self, Box<dyn wasmtime_environ::Compiler>)> {
-        let target = self.compiler_config.target.clone();
+        let target = self.compiler_target();
+
+        // The target passed to the builders below is an `Option<Triple>` where
+        // `None` represents the current host with CPU features inferred from
+        // the host's CPU itself. The `target` above is not an `Option`, so
+        // switch it to `None` in the case that a target wasn't explicitly
+        // specified (which indicates no feature inference) and the target
+        // matches the host.
+        let target_for_builder =
+            if self.compiler_config.target.is_none() && target == target_lexicon::Triple::host() {
+                None
+            } else {
+                Some(target.clone())
+            };
 
         let mut compiler = match self.compiler_config.strategy {
             #[cfg(feature = "cranelift")]
-            Some(Strategy::Cranelift) => wasmtime_cranelift::builder(target)?,
+            Some(Strategy::Cranelift) => wasmtime_cranelift::builder(target_for_builder)?,
             #[cfg(not(feature = "cranelift"))]
             Some(Strategy::Cranelift) => bail!("cranelift support not compiled in"),
             #[cfg(feature = "winch")]
-            Some(Strategy::Winch) => wasmtime_winch::builder(target)?,
+            Some(Strategy::Winch) => wasmtime_winch::builder(target_for_builder)?,
             #[cfg(not(feature = "winch"))]
             Some(Strategy::Winch) => bail!("winch support not compiled in"),
 
@@ -2174,8 +2290,6 @@ impl Config {
         self.compiler_config
             .settings
             .insert("probestack_strategy".into(), "inline".into());
-
-        let target = self.compiler_target();
 
         // We enable stack probing by default on all targets.
         // This is required on Windows because of the way Windows
@@ -2392,6 +2506,7 @@ impl Config {
     /// are enabled by default.
     ///
     /// **Note** Disabling this option is not compatible with the Winch compiler.
+    #[cfg(feature = "signals-based-traps")]
     pub fn signals_based_traps(&mut self, enable: bool) -> &mut Self {
         self.tunables.signals_based_traps = Some(enable);
         self
@@ -2618,6 +2733,29 @@ pub enum OptLevel {
     SpeedAndSize,
 }
 
+/// Possible register allocator algorithms for the Cranelift codegen backend.
+#[non_exhaustive]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+pub enum RegallocAlgorithm {
+    /// Generates the fastest possible code, but may take longer.
+    ///
+    /// This algorithm performs "backtracking", which means that it may
+    /// undo its earlier work and retry as it discovers conflicts. This
+    /// results in better register utilization, producing fewer spills
+    /// and moves, but can cause super-linear compile runtime.
+    Backtracking,
+    /// Generates acceptable code very quickly.
+    ///
+    /// This algorithm performs a single pass through the code,
+    /// guaranteed to work in linear time.  (Note that the rest of
+    /// Cranelift is not necessarily guaranteed to run in linear time,
+    /// however.) It cannot undo earlier decisions, however, and it
+    /// cannot foresee constraints or issues that may occur further
+    /// ahead in the code, so the code may have more spills and moves as
+    /// a result.
+    SinglePass,
+}
+
 /// Select which profiling technique to support.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ProfilingStrategy {
@@ -2711,19 +2849,19 @@ pub enum WasmBacktraceDetails {
 /// Additionally the main cost of the pooling allocator is that it requires a
 /// very large reservation of virtual memory (on the order of most of the
 /// addressable virtual address space). WebAssembly 32-bit linear memories in
-/// Wasmtime are, by default 4G address space reservations with a 2G guard
+/// Wasmtime are, by default 4G address space reservations with a small guard
 /// region both before and after the linear memory. Memories in the pooling
 /// allocator are contiguous which means that we only need a guard after linear
 /// memory because the previous linear memory's slot post-guard is our own
-/// pre-guard. This means that, by default, the pooling allocator uses 6G of
-/// virtual memory per WebAssembly linear memory slot. 6G of virtual memory is
-/// 32.5 bits of a 64-bit address. Many 64-bit systems can only actually use
-/// 48-bit addresses by default (although this can be extended on architectures
-/// nowadays too), and of those 48 bits one of them is reserved to indicate
-/// kernel-vs-userspace. This leaves 47-32.5=14.5 bits left, meaning you can
-/// only have at most 64k slots of linear memories on many systems by default.
-/// This is a relatively small number and shows how the pooling allocator can
-/// quickly exhaust all of virtual memory.
+/// pre-guard. This means that, by default, the pooling allocator uses roughly
+/// 4G of virtual memory per WebAssembly linear memory slot. 4G of virtual
+/// memory is 32 bits of a 64-bit address. Many 64-bit systems can only
+/// actually use 48-bit addresses by default (although this can be extended on
+/// architectures nowadays too), and of those 48 bits one of them is reserved
+/// to indicate kernel-vs-userspace. This leaves 47-32=15 bits left,
+/// meaning you can only have at most 32k slots of linear memories on many
+/// systems by default. This is a relatively small number and shows how the
+/// pooling allocator can quickly exhaust all of virtual memory.
 ///
 /// Another disadvantage of the pooling allocator is that it may keep memory
 /// alive when nothing is using it. A previously used slot for an instance might

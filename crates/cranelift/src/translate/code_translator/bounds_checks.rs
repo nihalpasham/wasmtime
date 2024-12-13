@@ -20,7 +20,8 @@
 //! !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
 use super::Reachability;
-use crate::translate::{FuncEnvironment, HeapData};
+use crate::func_environ::FuncEnvironment;
+use crate::translate::{HeapData, TargetEnvironment};
 use cranelift_codegen::{
     cursor::{Cursor, FuncCursor},
     ir::{self, condcodes::IntCC, InstBuilder, RelSourceLoc},
@@ -35,9 +36,9 @@ use Reachability::*;
 ///
 /// Returns the `ir::Value` holding the native address of the heap access, or
 /// `None` if the heap access will unconditionally trap.
-pub fn bounds_check_and_compute_addr<Env>(
+pub fn bounds_check_and_compute_addr(
     builder: &mut FunctionBuilder,
-    env: &mut Env,
+    env: &mut FuncEnvironment<'_>,
     heap: &HeapData,
     // Dynamic operand indexing into the heap.
     index: ir::Value,
@@ -45,10 +46,7 @@ pub fn bounds_check_and_compute_addr<Env>(
     offset: u32,
     // Static size of the heap access.
     access_size: u8,
-) -> WasmResult<Reachability<ir::Value>>
-where
-    Env: FuncEnvironment + ?Sized,
-{
+) -> WasmResult<Reachability<ir::Value>> {
     let pointer_bit_width = u16::try_from(env.pointer_type().bits()).unwrap();
     let bound_gv = heap.bound;
     let orig_index = index;
@@ -60,16 +58,20 @@ where
         &mut builder.cursor(),
     );
     let offset_and_size = offset_plus_size(offset, access_size);
-    let spectre_mitigations_enabled = env.heap_access_spectre_mitigation();
+    let clif_memory_traps_enabled = env.clif_memory_traps_enabled();
+    let spectre_mitigations_enabled =
+        env.heap_access_spectre_mitigation() && clif_memory_traps_enabled;
     let pcc = env.proof_carrying_code();
 
     let host_page_size_log2 = env.target_config().page_size_align_log2;
     let can_use_virtual_memory = heap
         .memory
-        .can_use_virtual_memory(env.tunables(), host_page_size_log2);
+        .can_use_virtual_memory(env.tunables(), host_page_size_log2)
+        && clif_memory_traps_enabled;
     let can_elide_bounds_check = heap
         .memory
-        .can_elide_bounds_check(env.tunables(), host_page_size_log2);
+        .can_elide_bounds_check(env.tunables(), host_page_size_log2)
+        && clif_memory_traps_enabled;
     let memory_guard_size = env.tunables().memory_guard_size;
     let memory_reservation = env.tunables().memory_reservation;
 
@@ -144,10 +146,20 @@ where
     // different bounds checks and optimizations of those bounds checks. It is
     // intentionally written in a straightforward case-matching style that will
     // hopefully make it easy to port to ISLE one day.
-    if offset_and_size >= heap.memory.maximum_byte_size().unwrap_or(u64::MAX) {
+    if offset_and_size > heap.memory.maximum_byte_size().unwrap_or(u64::MAX) {
         // Special case: trap immediately if `offset + access_size >
         // max_memory_size`, since we will end up being out-of-bounds regardless
         // of the given `index`.
+        env.before_unconditionally_trapping_memory_access(builder)?;
+        env.trap(builder, ir::TrapCode::HEAP_OUT_OF_BOUNDS);
+        return Ok(Unreachable);
+    }
+
+    // Special case: if this is a 32-bit platform and the `offset_and_size`
+    // overflows the 32-bit address space then there's no hope of this ever
+    // being in-bounds. We can't represent `offset_and_size` in CLIF as the
+    // native pointer type anyway, so this is an unconditional trap.
+    if pointer_bit_width < 64 && offset_and_size >= (1 << pointer_bit_width) {
         env.before_unconditionally_trapping_memory_access(builder)?;
         env.trap(builder, ir::TrapCode::HEAP_OUT_OF_BOUNDS);
         return Ok(Unreachable);
@@ -429,14 +441,11 @@ where
 }
 
 /// Get the bound of a dynamic heap as an `ir::Value`.
-fn get_dynamic_heap_bound<Env>(
+fn get_dynamic_heap_bound(
     builder: &mut FunctionBuilder,
-    env: &mut Env,
+    env: &mut FuncEnvironment<'_>,
     heap: &HeapData,
-) -> ir::Value
-where
-    Env: FuncEnvironment + ?Sized,
-{
+) -> ir::Value {
     let enable_pcc = heap.pcc_memory_type.is_some();
 
     let (value, gv) = match heap.memory.static_heap_size() {
@@ -535,8 +544,8 @@ impl AddrPcc {
 ///
 /// This function deduplicates explicit bounds checks and Spectre mitigations
 /// that inherently also implement bounds checking.
-fn explicit_check_oob_condition_and_compute_addr<FE: FuncEnvironment + ?Sized>(
-    env: &mut FE,
+fn explicit_check_oob_condition_and_compute_addr(
+    env: &mut FuncEnvironment<'_>,
     builder: &mut FunctionBuilder,
     heap: &HeapData,
     index: ir::Value,
@@ -560,8 +569,9 @@ fn explicit_check_oob_condition_and_compute_addr<FE: FuncEnvironment + ?Sized>(
 
     if spectre_mitigations_enabled {
         // These mitigations rely on trapping when loading from NULL so
-        // signals-based traps must be allowed for this to be generated.
-        assert!(env.signals_based_traps());
+        // CLIF memory instruction traps must be allowed for this to be
+        // generated.
+        assert!(env.clif_memory_traps_enabled());
         let null = builder.ins().iconst(addr_ty, 0);
         addr = builder
             .ins()

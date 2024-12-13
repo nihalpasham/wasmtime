@@ -3,6 +3,7 @@ use wasmtime_environ::{VMOffsets, WasmHeapType, WasmValType};
 use super::ControlStackFrame;
 use crate::{
     abi::{scratch, vmctx, ABIOperand, ABIResults, RetArea},
+    codegen::{CodeGenPhase, Emission, Prologue},
     frame::Frame,
     isa::reg::RegClass,
     masm::{MacroAssembler, OperandSize, RegImm, SPOffset, ShiftKind, StackSlot},
@@ -26,25 +27,78 @@ use crate::{
 /// generation process. The code generation context should
 /// be generally used as the single entry point to access
 /// the compound functionality provided by its elements.
-pub(crate) struct CodeGenContext<'a> {
+pub(crate) struct CodeGenContext<'a, P: CodeGenPhase> {
     /// The register allocator.
     pub regalloc: RegAlloc,
     /// The value stack.
     pub stack: Stack,
     /// The current function's frame.
-    pub frame: Frame,
+    pub frame: Frame<P>,
     /// Reachability state.
     pub reachable: bool,
     /// A reference to the VMOffsets.
     pub vmoffsets: &'a VMOffsets<u8>,
 }
 
-impl<'a> CodeGenContext<'a> {
+impl<'a> CodeGenContext<'a, Emission> {
+    /// Prepares arguments for emitting an i32 shift operation.
+    pub fn i32_shift<M>(&mut self, masm: &mut M, kind: ShiftKind)
+    where
+        M: MacroAssembler,
+    {
+        let top = self.stack.peek().expect("value at stack top");
+
+        if top.is_i32_const() {
+            let val = self
+                .stack
+                .pop_i32_const()
+                .expect("i32 const value at stack top");
+            let typed_reg = self.pop_to_reg(masm, None);
+            masm.shift_ir(
+                writable!(typed_reg.reg),
+                val as u64,
+                typed_reg.reg,
+                kind,
+                OperandSize::S32,
+            );
+            self.stack.push(typed_reg.into());
+        } else {
+            masm.shift(self, kind, OperandSize::S32);
+        }
+    }
+
+    /// Prepares arguments for emitting an i64 binary operation.
+    pub fn i64_shift<M>(&mut self, masm: &mut M, kind: ShiftKind)
+    where
+        M: MacroAssembler,
+    {
+        let top = self.stack.peek().expect("value at stack top");
+        if top.is_i64_const() {
+            let val = self
+                .stack
+                .pop_i64_const()
+                .expect("i64 const value at stack top");
+            let typed_reg = self.pop_to_reg(masm, None);
+            masm.shift_ir(
+                writable!(typed_reg.reg),
+                val as u64,
+                typed_reg.reg,
+                kind,
+                OperandSize::S64,
+            );
+            self.stack.push(typed_reg.into());
+        } else {
+            masm.shift(self, kind, OperandSize::S64);
+        };
+    }
+}
+
+impl<'a> CodeGenContext<'a, Prologue> {
     /// Create a new code generation context.
     pub fn new(
         regalloc: RegAlloc,
         stack: Stack,
-        frame: Frame,
+        frame: Frame<Prologue>,
         vmoffsets: &'a VMOffsets<u8>,
     ) -> Self {
         Self {
@@ -56,6 +110,19 @@ impl<'a> CodeGenContext<'a> {
         }
     }
 
+    /// Prepares the frame for the [`Emission`] code generation phase.
+    pub fn for_emission(self) -> CodeGenContext<'a, Emission> {
+        CodeGenContext {
+            regalloc: self.regalloc,
+            stack: self.stack,
+            reachable: self.reachable,
+            vmoffsets: self.vmoffsets,
+            frame: self.frame.for_emission(),
+        }
+    }
+}
+
+impl<'a> CodeGenContext<'a, Emission> {
     /// Request a specific register to the register allocator,
     /// spilling if not available.
     pub fn reg<M: MacroAssembler>(&mut self, named: Reg, masm: &mut M) -> Reg {
@@ -241,9 +308,9 @@ impl<'a> CodeGenContext<'a> {
     /// Prepares arguments for emitting a binary operation.
     ///
     /// The `emit` function returns the `TypedReg` to put on the value stack.
-    pub fn binop<F, M>(&mut self, masm: &mut M, size: OperandSize, mut emit: F)
+    pub fn binop<F, M>(&mut self, masm: &mut M, size: OperandSize, emit: F)
     where
-        F: FnMut(&mut M, Reg, Reg, OperandSize) -> TypedReg,
+        F: FnOnce(&mut M, Reg, Reg, OperandSize) -> TypedReg,
         M: MacroAssembler,
     {
         let src = self.pop_to_reg(masm, None);
@@ -254,9 +321,9 @@ impl<'a> CodeGenContext<'a> {
     }
 
     /// Prepares arguments for emitting an f32 or f64 comparison operation.
-    pub fn float_cmp_op<F, M>(&mut self, masm: &mut M, size: OperandSize, mut emit: F)
+    pub fn float_cmp_op<F, M>(&mut self, masm: &mut M, size: OperandSize, emit: F)
     where
-        F: FnMut(&mut M, Reg, Reg, Reg, OperandSize),
+        F: FnOnce(&mut M, Reg, Reg, Reg, OperandSize),
         M: MacroAssembler,
     {
         let src2 = self.pop_to_reg(masm, None);
@@ -304,9 +371,9 @@ impl<'a> CodeGenContext<'a> {
     /// Prepares arguments for emitting an i64 binary operation.
     ///
     /// The `emit` function returns the `TypedReg` to put on the value stack.
-    pub fn i64_binop<F, M>(&mut self, masm: &mut M, mut emit: F)
+    pub fn i64_binop<F, M>(&mut self, masm: &mut M, emit: F)
     where
-        F: FnMut(&mut M, Reg, RegImm, OperandSize) -> TypedReg,
+        F: FnOnce(&mut M, Reg, RegImm, OperandSize) -> TypedReg,
         M: MacroAssembler,
     {
         let top = self.stack.peek().expect("value at stack top");
@@ -325,61 +392,10 @@ impl<'a> CodeGenContext<'a> {
         };
     }
 
-    /// Prepares arguments for emitting an i32 shift operation.
-    pub fn i32_shift<M>(&mut self, masm: &mut M, kind: ShiftKind)
-    where
-        M: MacroAssembler,
-    {
-        let top = self.stack.peek().expect("value at stack top");
-
-        if top.is_i32_const() {
-            let val = self
-                .stack
-                .pop_i32_const()
-                .expect("i32 const value at stack top");
-            let typed_reg = self.pop_to_reg(masm, None);
-            masm.shift_ir(
-                writable!(typed_reg.reg),
-                val as u64,
-                typed_reg.reg,
-                kind,
-                OperandSize::S32,
-            );
-            self.stack.push(typed_reg.into());
-        } else {
-            masm.shift(self, kind, OperandSize::S32);
-        }
-    }
-
-    /// Prepares arguments for emitting an i64 binary operation.
-    pub fn i64_shift<M>(&mut self, masm: &mut M, kind: ShiftKind)
-    where
-        M: MacroAssembler,
-    {
-        let top = self.stack.peek().expect("value at stack top");
-        if top.is_i64_const() {
-            let val = self
-                .stack
-                .pop_i64_const()
-                .expect("i64 const value at stack top");
-            let typed_reg = self.pop_to_reg(masm, None);
-            masm.shift_ir(
-                writable!(typed_reg.reg),
-                val as u64,
-                typed_reg.reg,
-                kind,
-                OperandSize::S64,
-            );
-            self.stack.push(typed_reg.into());
-        } else {
-            masm.shift(self, kind, OperandSize::S64);
-        };
-    }
-
     /// Prepares arguments for emitting a convert operation.
-    pub fn convert_op<F, M>(&mut self, masm: &mut M, dst_ty: WasmValType, mut emit: F)
+    pub fn convert_op<F, M>(&mut self, masm: &mut M, dst_ty: WasmValType, emit: F)
     where
-        F: FnMut(&mut M, Reg, Reg, OperandSize),
+        F: FnOnce(&mut M, Reg, Reg, OperandSize),
         M: MacroAssembler,
     {
         let src = self.pop_to_reg(masm, None);
@@ -406,9 +422,9 @@ impl<'a> CodeGenContext<'a> {
         masm: &mut M,
         dst_ty: WasmValType,
         tmp_reg_class: RegClass,
-        mut emit: F,
+        emit: F,
     ) where
-        F: FnMut(&mut M, Reg, Reg, Reg, OperandSize),
+        F: FnOnce(&mut M, Reg, Reg, Reg, OperandSize),
         M: MacroAssembler,
     {
         let tmp_gpr = self.reg_for_class(tmp_reg_class, masm);
@@ -511,7 +527,7 @@ impl<'a> CodeGenContext<'a> {
         mut calculate_ret_area: F,
     ) where
         M: MacroAssembler,
-        F: FnMut(&ABIResults, &mut CodeGenContext, &mut M) -> Option<RetArea>,
+        F: FnMut(&ABIResults, &mut CodeGenContext<Emission>, &mut M) -> Option<RetArea>,
     {
         let area = results
             .on_stack()
@@ -558,7 +574,7 @@ impl<'a> CodeGenContext<'a> {
     where
         M: MacroAssembler,
     {
-        let addr = masm.local_address(&self.frame.vmctx_slot);
+        let addr = masm.local_address(&self.frame.vmctx_slot());
         masm.load_ptr(addr, writable!(vmctx!(M)));
     }
 
@@ -570,7 +586,7 @@ impl<'a> CodeGenContext<'a> {
     fn spill_impl<M: MacroAssembler>(
         stack: &mut Stack,
         regalloc: &mut RegAlloc,
-        frame: &Frame,
+        frame: &Frame<Emission>,
         masm: &mut M,
     ) {
         stack.inner_mut().iter_mut().for_each(|v| match v {
@@ -607,5 +623,12 @@ impl<'a> CodeGenContext<'a> {
         self.free_reg(rhs_lo);
         self.stack.push(lo.into());
         self.stack.push(hi.into());
+    }
+
+    /// Pops a register from the stack and then immediately frees it. Used to
+    /// discard values from the last operation, for example.
+    pub fn pop_and_free<M: MacroAssembler>(&mut self, masm: &mut M) {
+        let reg = self.pop_to_reg(masm, None);
+        self.free_reg(reg.reg);
     }
 }

@@ -1,3 +1,4 @@
+#![expect(clippy::allow_attributes_without_reason, reason = "crate not migrated")]
 #![cfg_attr(miri, allow(dead_code, unused_imports))]
 
 mod arrays;
@@ -7,6 +8,7 @@ mod cli_tests;
 mod code_too_large;
 mod component_model;
 mod coredump;
+mod custom_code_memory;
 mod debug;
 mod defaults;
 mod epoch_interruption;
@@ -33,6 +35,7 @@ mod name;
 mod noextern;
 mod piped_tests;
 mod pooling_allocator;
+mod pulley;
 mod relocs;
 mod stack_creator;
 mod stack_overflow;

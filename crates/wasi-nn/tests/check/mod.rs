@@ -4,8 +4,6 @@
 //! - that various backends can be located on the system (see sub-modules)
 //! - that certain ML model artifacts can be downloaded and cached.
 
-#[allow(unused_imports)]
-use anyhow::{anyhow, Context, Result};
 use std::{
     env,
     path::{Path, PathBuf},
@@ -13,7 +11,7 @@ use std::{
     sync::Mutex,
 };
 
-#[cfg(any(feature = "onnx", feature = "winml"))]
+#[cfg(any(feature = "onnx", all(feature = "winml", target_os = "windows")))]
 pub mod onnx;
 #[cfg(feature = "openvino")]
 pub mod openvino;

@@ -10,6 +10,7 @@ use crate::ir::{condcodes::*, immediates::*, types::*, *};
 use crate::isa::pulley_shared::{
     abi::*,
     inst::{FReg, OperandSize, VReg, WritableFReg, WritableVReg, WritableXReg, XReg},
+    lower::regs,
     *,
 };
 use crate::machinst::{
@@ -50,10 +51,6 @@ where
 {
     crate::isle_lower_prelude_methods!(InstAndKind<P>);
     crate::isle_prelude_caller_methods!(PulleyABICallSite<P>);
-
-    fn lower_br_table(&mut self, _index: Reg, _targets: &[MachLabel]) -> Unit {
-        todo!()
-    }
 
     fn vreg_new(&mut self, r: Reg) -> VReg {
         VReg::new(r).unwrap()
@@ -104,6 +101,18 @@ where
     #[inline]
     fn emit(&mut self, arg0: &MInst) -> Unit {
         self.lower_ctx.emit(arg0.clone().into());
+    }
+
+    fn sp_reg(&mut self) -> XReg {
+        XReg::new(regs::stack_reg()).unwrap()
+    }
+
+    fn fp_reg(&mut self) -> XReg {
+        XReg::new(regs::fp_reg()).unwrap()
+    }
+
+    fn lr_reg(&mut self) -> XReg {
+        XReg::new(regs::lr_reg()).unwrap()
     }
 }
 

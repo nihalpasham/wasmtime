@@ -25,7 +25,7 @@ pub struct CompiledFunctionInfo {
 /// Information about a function, such as trap information, address map,
 /// and stack maps.
 #[derive(Serialize, Deserialize, Default)]
-#[allow(missing_docs)]
+#[allow(missing_docs, reason = "self-describing fields")]
 pub struct WasmFunctionInfo {
     pub start_srcloc: FilePos,
     pub stack_maps: Box<[StackMapInformation]>,
@@ -106,10 +106,6 @@ pub struct Metadata {
     /// Note that even if this flag is `true` sections may be missing if they
     /// weren't found in the original wasm module itself.
     pub has_wasm_debuginfo: bool,
-
-    /// Whether this artifact contains Pulley bytecode (instead of machine code)
-    /// or not.
-    pub is_pulley: bool,
 
     /// Dwarf sections and the offsets at which they're stored in the
     /// ELF_WASMTIME_DWARF

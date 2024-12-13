@@ -54,8 +54,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use wasmtime::{Engine, OptLevel, Strategy};
 use wasmtime_cli_flags::CommonOptions;
-
-mod support;
+use wasmtime_environ::TripleExt;
 
 fn main() -> Result<()> {
     if cfg!(miri) {
@@ -153,7 +152,7 @@ impl Test {
     fn new(path: &Path) -> Result<Test> {
         let contents =
             std::fs::read_to_string(path).with_context(|| format!("failed to read {path:?}"))?;
-        let config: TestConfig = support::parse_test_config(&contents)
+        let config: TestConfig = wasmtime_wast_util::parse_test_config(&contents)
             .context("failed to parse test configuration as TOML")?;
         let mut flags = vec!["wasmtime"];
         match &config.flags {
@@ -176,7 +175,8 @@ impl Test {
         // Use wasmtime::Config with its `emit_clif` option to get Wasmtime's
         // code generator to jettison CLIF out the back.
         let tempdir = TempDir::new().context("failed to make a tempdir")?;
-        let mut config = self.opts.config(Some(&self.config.target), None)?;
+        let mut config = self.opts.config(None)?;
+        config.target(&self.config.target)?;
         match self.config.test {
             TestKind::Clif | TestKind::Optimize => {
                 config.emit_clif(tempdir.path());
@@ -348,10 +348,7 @@ fn assert_output(
                     .collect::<Vec<_>>())
             })?,
             Err(_) => {
-                assert!(matches!(
-                    isa.triple().architecture,
-                    target_lexicon::Architecture::Pulley32 | target_lexicon::Architecture::Pulley64
-                ));
+                assert!(isa.triple().is_pulley());
                 disas_insts(&mut actual, &bytes, |bytes, _addr| {
                     let mut result = vec![];
 
@@ -359,7 +356,7 @@ fn assert_output(
                     disas.offsets(false);
                     disas.hexdump(false);
                     let mut decoder = pulley_interpreter::decode::Decoder::new();
-
+                    let mut last_disas_pos = 0;
                     loop {
                         let addr = disas.bytecode().position();
 
@@ -376,22 +373,17 @@ fn assert_output(
                             }
 
                             Ok(()) => {
-                                let disassembly = disas
-                                    .disas()
-                                    .lines()
-                                    .map(|l| l.trim().to_string())
-                                    .filter(|l| !l.is_empty())
-                                    .next_back()
-                                    .unwrap();
+                                let disassembly = disas.disas()[last_disas_pos..].trim();
+                                last_disas_pos = disas.disas().len();
                                 let address = u64::try_from(addr).unwrap();
                                 let is_jump =
-                                    disassembly.contains("jump") || disassembly.contains("br_if");
+                                    disassembly.contains("jump") || disassembly.contains("br_");
                                 let is_return = disassembly == "ret";
                                 result.push(DisasInst {
                                     address,
                                     is_jump,
                                     is_return,
-                                    disassembly,
+                                    disassembly: disassembly.to_string(),
                                 });
                             }
                         }
@@ -460,13 +452,14 @@ where
             disassembly: disas,
         } in disas(bytes, sym.address())?.into_iter()
         {
-            if write_offsets || (prev_jump && !is_jump) {
-                write!(result, "{address:>4x}: ")?;
-            } else {
-                write!(result, "      ")?;
+            for (i, line) in disas.lines().enumerate() {
+                if i == 0 && (write_offsets || (prev_jump && !is_jump)) {
+                    write!(result, "{address:>4x}: ")?;
+                } else {
+                    write!(result, "      ")?;
+                }
+                writeln!(result, "{line}")?;
             }
-
-            writeln!(result, "{disas}")?;
 
             prev_jump = is_jump;
 

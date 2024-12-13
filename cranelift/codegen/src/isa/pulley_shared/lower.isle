@@ -49,10 +49,8 @@
       (lower_brif_of_icmp32 (IntCC.UnsignedLessThanOrEqual) b a then else))
 
 ;; Branch tables.
-(decl lower_br_table (Reg MachLabelSlice) Unit)
-(extern constructor lower_br_table lower_br_table)
-(rule (lower_branch (br_table index _) targets)
-      (lower_br_table index targets))
+(rule (lower_branch (br_table index _) (jump_table_targets default targets))
+      (gen_br_table index default targets))
 
 ;;;; Rules for `trap` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -61,7 +59,7 @@
 
 ;;;; Rules for `trapz` and `trapnz` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-(rule (lower (trapz a @ (value_type (fits_in_64 ty)) code))
+(rule (lower (trapz a @ (value_type (ty_32_or_64 ty)) code))
       (let ((zero Reg (pulley_xconst8 0)))
         (side_effect (pulley_trap_if (IntCC.Equal)
                                      (ty_to_operand_size ty)
@@ -69,7 +67,7 @@
                                      zero
                                      code))))
 
-(rule (lower (trapnz a @ (value_type (fits_in_64 ty)) code))
+(rule (lower (trapnz a @ (value_type (ty_32_or_64 ty)) code))
       (let ((zero Reg (pulley_xconst8 0)))
         (side_effect (pulley_trap_if (IntCC.NotEqual)
                                      (ty_to_operand_size ty)
@@ -79,14 +77,14 @@
 
 ;; Fold `(trap[n]z (icmp ...))` together.
 
-(rule 1 (lower (trapz (icmp cc a b @ (value_type (fits_in_64 ty))) code))
+(rule 1 (lower (trapz (icmp cc a b @ (value_type (ty_32_or_64 ty))) code))
       (side_effect (pulley_trap_if (intcc_complement cc)
                                    (ty_to_operand_size ty)
                                    a
                                    b
                                    code)))
 
-(rule 1 (lower (trapnz (icmp cc a b @ (value_type (fits_in_64 ty))) code))
+(rule 1 (lower (trapnz (icmp cc a b @ (value_type (ty_32_or_64 ty))) code))
       (side_effect (pulley_trap_if cc
                                    (ty_to_operand_size ty)
                                    a
@@ -116,7 +114,17 @@
 ;;;; Rules for `get_stack_pointer` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (rule (lower (get_stack_pointer))
-      (pulley_get_sp))
+      (pulley_get_special (sp_reg)))
+
+;;;; Rules for `get_frame_pointer` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(rule (lower (get_frame_pointer))
+      (pulley_get_special (fp_reg)))
+
+;;;; Rules for `get_return_address` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(rule (lower (get_return_address))
+      (pulley_get_special (lr_reg)))
 
 ;;;; Rules for `return` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -158,6 +166,30 @@
 
 (rule (lower (has_type $I64 (iadd a b)))
       (pulley_xadd64 a b))
+
+;;;; Rules for `isub` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(rule (lower (has_type $I8 (isub a b)))
+      (pulley_xsub32 a b))
+
+(rule (lower (has_type $I16 (isub a b)))
+      (pulley_xsub32 a b))
+
+(rule (lower (has_type $I32 (isub a b)))
+      (pulley_xsub32 a b))
+
+(rule (lower (has_type $I64 (isub a b)))
+      (pulley_xsub64 a b))
+
+;;;; Rules for `idiv` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(rule (lower (has_type $I32 (sdiv a b)))
+      (pulley_xdiv32_s a b))
+
+;;;; Rules for `band` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(rule (lower (has_type $I32 (band a b)))
+      (pulley_xand32 a b))
 
 ;;;; Rules for `icmp` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -215,18 +247,107 @@
 (rule (lower_icmp ty (IntCC.UnsignedGreaterThanOrEqual) a b)
       (lower_icmp ty (IntCC.UnsignedLessThanOrEqual) b a))
 
-;;;; Rules for `load` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;; Rules for `load` and friends ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-(rule (lower (has_type ty (load flags addr (offset32 offset))))
-      (pulley_load (Amode.RegOffset addr (i32_as_i64 offset))
-                   ty
-                   flags
-                   (ExtKind.Zero)))
+(decl amode (Value Offset32) Amode)
+(rule (amode addr (offset32 offset)) (Amode.RegOffset addr offset))
 
-;;;; Rules for `store` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+(rule (lower (has_type (ty_int ty) (load flags addr offset)))
+  (pulley_xload (amode addr offset) ty flags (ExtKind.None)))
 
-(rule (lower (store flags src @ (value_type ty) addr (offset32 offset)))
-      (side_effect (pulley_store (Amode.RegOffset addr (i32_as_i64 offset))
-                                 src
-                                 ty
-                                 flags)))
+(rule 1 (lower (has_type (ty_scalar_float ty) (load flags addr offset)))
+  (pulley_fload (amode addr offset) ty flags))
+
+(rule 0 (lower (has_type (ty_int (fits_in_32 _)) (uload8 flags addr offset)))
+  (pulley_xload (amode addr offset) $I8 flags (ExtKind.Zero32)))
+
+(rule 0 (lower (has_type (ty_int (fits_in_32 _)) (uload16 flags addr offset)))
+  (pulley_xload (amode addr offset) $I16 flags (ExtKind.Zero32)))
+
+(rule 0 (lower (has_type (ty_int (fits_in_32 _)) (uload32 flags addr offset)))
+  (pulley_xload (amode addr offset) $I32 flags (ExtKind.None)))
+
+(rule 1 (lower (has_type $I64 (uload8 flags addr offset)))
+  (pulley_xload (amode addr offset) $I8 flags (ExtKind.Zero64)))
+
+(rule 1 (lower (has_type $I64 (uload16 flags addr offset)))
+  (pulley_xload (amode addr offset) $I16 flags (ExtKind.Zero64)))
+
+(rule 1 (lower (has_type $I64 (uload32 flags addr offset)))
+  (pulley_xload (amode addr offset) $I32 flags (ExtKind.Zero64)))
+
+(rule 0 (lower (has_type (ty_int (fits_in_32 _)) (sload8 flags addr offset)))
+  (pulley_xload (amode addr offset) $I8 flags (ExtKind.Sign32)))
+
+(rule 0 (lower (has_type (ty_int (fits_in_32 _)) (sload16 flags addr offset)))
+  (pulley_xload (amode addr offset) $I16 flags (ExtKind.Sign32)))
+
+(rule 0 (lower (has_type (ty_int (fits_in_32 _)) (sload32 flags addr offset)))
+  (pulley_xload (amode addr offset) $I32 flags (ExtKind.None)))
+
+(rule 1 (lower (has_type $I64 (sload8 flags addr offset)))
+  (pulley_xload (amode addr offset) $I8 flags (ExtKind.Sign64)))
+
+(rule 1 (lower (has_type $I64 (sload16 flags addr offset)))
+  (pulley_xload (amode addr offset) $I16 flags (ExtKind.Sign64)))
+
+(rule 1 (lower (has_type $I64 (sload32 flags addr offset)))
+  (pulley_xload (amode addr offset) $I32 flags (ExtKind.Sign64)))
+
+;;;; Rules for `store` and friends ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(rule (lower (store flags src @ (value_type ty) addr offset))
+  (side_effect (pulley_xstore (amode addr offset) src ty flags)))
+
+(rule 1 (lower (store flags src @ (value_type (ty_scalar_float ty)) addr offset))
+  (side_effect (pulley_fstore (amode addr offset) src ty flags)))
+
+(rule (lower (istore8 flags src addr offset))
+  (side_effect (pulley_xstore (amode addr offset) src $I8 flags)))
+
+(rule (lower (istore16 flags src addr offset))
+  (side_effect (pulley_xstore (amode addr offset) src $I16 flags)))
+
+(rule (lower (istore32 flags src addr offset))
+  (side_effect (pulley_xstore (amode addr offset) src $I32 flags)))
+
+;;;; Rules for `stack_addr` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(rule (lower (stack_addr stack_slot offset))
+      (lower_stack_addr stack_slot offset))
+
+(decl lower_stack_addr (StackSlot Offset32) XReg)
+(rule (lower_stack_addr stack_slot offset)
+      (let ((dst WritableXReg (temp_writable_xreg))
+            (_ Unit (emit (abi_stackslot_addr dst stack_slot offset))))
+        dst))
+
+;;;; Rules for `uextend` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(rule (lower (has_type (fits_in_64 _) (uextend val @ (value_type $I8))))
+  (pulley_zext8 val))
+
+(rule (lower (has_type (fits_in_64 _) (uextend val @ (value_type $I16))))
+  (pulley_zext16 val))
+
+(rule (lower (has_type (fits_in_64 _) (uextend val @ (value_type $I32))))
+  (pulley_zext32 val))
+
+;;;; Rules for `sextend` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(rule (lower (has_type (fits_in_64 _) (sextend val @ (value_type $I8))))
+  (pulley_sext8 val))
+
+(rule (lower (has_type (fits_in_64 _) (sextend val @ (value_type $I16))))
+  (pulley_sext16 val))
+
+(rule (lower (has_type (fits_in_64 _) (sextend val @ (value_type $I32))))
+  (pulley_sext32 val))
+
+;;;; Rules for `uadd_overflow_trap` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(rule (lower (has_type $I32 (uadd_overflow_trap a b tc)))
+  (pulley_xadd32_uoverflow_trap a b tc))
+
+(rule (lower (has_type $I64 (uadd_overflow_trap a b tc)))
+  (pulley_xadd64_uoverflow_trap a b tc))

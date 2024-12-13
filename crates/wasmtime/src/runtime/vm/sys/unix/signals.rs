@@ -1,30 +1,16 @@
 //! Trap handling on Unix based on POSIX signals.
 
+use crate::prelude::*;
+use crate::runtime::vm::sys::traphandlers::wasmtime_longjmp;
 use crate::runtime::vm::traphandlers::{tls, TrapRegisters, TrapTest};
-use crate::runtime::vm::VMContext;
 use std::cell::RefCell;
 use std::io;
 use std::mem;
 use std::ptr::{self, addr_of, addr_of_mut, null_mut};
 
-#[link(name = "wasmtime-helpers")]
-extern "C" {
-    #[wasmtime_versioned_export_macros::versioned_link]
-    #[allow(improper_ctypes)]
-    pub fn wasmtime_setjmp(
-        jmp_buf: *mut *const u8,
-        callback: extern "C" fn(*mut u8, *mut VMContext),
-        payload: *mut u8,
-        callee: *mut VMContext,
-    ) -> i32;
-
-    #[wasmtime_versioned_export_macros::versioned_link]
-    pub fn wasmtime_longjmp(jmp_buf: *const u8) -> !;
-}
-
 /// Function which may handle custom signals while processing traps.
-pub type SignalHandler<'a> =
-    dyn Fn(libc::c_int, *const libc::siginfo_t, *const libc::c_void) -> bool + Send + Sync + 'a;
+pub type SignalHandler =
+    Box<dyn Fn(libc::c_int, *const libc::siginfo_t, *const libc::c_void) -> bool + Send + Sync>;
 
 const UNINIT_SIGACTION: libc::sigaction = unsafe { mem::zeroed() };
 static mut PREV_SIGSEGV: libc::sigaction = UNINIT_SIGACTION;
@@ -285,6 +271,12 @@ unsafe fn get_trap_registers(cx: *mut libc::c_void, _signum: libc::c_int) -> Tra
                 pc: cx.uc_mcontext.gregs[libc::REG_RIP as usize] as usize,
                 fp: cx.uc_mcontext.gregs[libc::REG_RBP as usize] as usize,
             }
+        } else if #[cfg(all(target_os = "linux", target_arch = "x86"))] {
+            let cx = &*(cx as *const libc::ucontext_t);
+            TrapRegisters {
+                pc: cx.uc_mcontext.gregs[libc::REG_EIP as usize] as usize,
+                fp: cx.uc_mcontext.gregs[libc::REG_EBP as usize] as usize,
+            }
         } else if #[cfg(all(any(target_os = "linux", target_os = "android"), target_arch = "aarch64"))] {
             let cx = &*(cx as *const libc::ucontext_t);
             TrapRegisters {
@@ -346,6 +338,12 @@ unsafe fn get_trap_registers(cx: *mut libc::c_void, _signum: libc::c_int) -> Tra
             TrapRegisters {
                 pc: cx.sc_rip as usize,
                 fp: cx.sc_rbp as usize,
+            }
+        } else if #[cfg(all(target_os = "linux", target_arch = "arm"))] {
+            let cx = &*(cx as *const libc::ucontext_t);
+            TrapRegisters {
+                pc: cx.uc_mcontext.arm_pc as usize,
+                fp: cx.uc_mcontext.arm_fp as usize,
             }
         } else {
             compile_error!("unsupported platform");

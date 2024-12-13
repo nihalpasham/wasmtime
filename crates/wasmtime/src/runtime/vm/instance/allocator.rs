@@ -8,6 +8,7 @@ use crate::runtime::vm::table::Table;
 use crate::runtime::vm::{CompiledModuleId, ModuleRuntimeInfo, VMFuncRef, VMGcRef, VMStore};
 use crate::store::{AutoAssertNoGc, StoreOpaque};
 use crate::vm::VMGlobalDefinition;
+use core::ptr::NonNull;
 use core::{any::Any, mem, ptr};
 use wasmtime_environ::{
     DefinedMemoryIndex, DefinedTableIndex, HostPtr, InitMemory, MemoryInitialization,
@@ -582,7 +583,7 @@ fn initialize_tables(
                         let gc_store = store.gc_store_mut()?;
                         let items = (0..table.size())
                             .map(|_| gc_ref.as_ref().map(|r| gc_store.clone_gc_ref(r)));
-                        table.init_gc_refs(0, items).err2anyhow()?;
+                        table.init_gc_refs(0, items)?;
                     }
 
                     WasmHeapTopType::Any => {
@@ -590,13 +591,13 @@ fn initialize_tables(
                         let gc_store = store.gc_store_mut()?;
                         let items = (0..table.size())
                             .map(|_| gc_ref.as_ref().map(|r| gc_store.clone_gc_ref(r)));
-                        table.init_gc_refs(0, items).err2anyhow()?;
+                        table.init_gc_refs(0, items)?;
                     }
 
                     WasmHeapTopType::Func => {
-                        let funcref = raw.get_funcref().cast::<VMFuncRef>();
+                        let funcref = NonNull::new(raw.get_funcref().cast::<VMFuncRef>());
                         let items = (0..table.size()).map(|_| funcref);
-                        table.init_func(0, items).err2anyhow()?;
+                        table.init_func(0, items)?;
                     }
                 }
             }
@@ -616,18 +617,15 @@ fn initialize_tables(
                 .eval(store, context, &segment.offset)
                 .expect("const expression should be valid")
         };
-        context
-            .instance
-            .table_init_segment(
-                store,
-                const_evaluator,
-                segment.table_index,
-                &segment.elements,
-                start.get_u64(),
-                0,
-                segment.elements.len(),
-            )
-            .err2anyhow()?;
+        context.instance.table_init_segment(
+            store,
+            const_evaluator,
+            segment.table_index,
+            &segment.elements,
+            start.get_u64(),
+            0,
+            segment.elements.len(),
+        )?;
     }
 
     Ok(())
@@ -761,7 +759,7 @@ fn initialize_memories(
             const_evaluator,
         });
     if !ok {
-        return Err(Trap::MemoryOutOfBounds).err2anyhow();
+        return Err(Trap::MemoryOutOfBounds.into());
     }
 
     Ok(())

@@ -90,7 +90,7 @@ impl StoreLimits {
             // `memcpy`. As more data is added over time growths get more and
             // more expensive meaning that fuel may not be effective at limiting
             // execution time.
-            remaining_growths: AtomicUsize::new(100),
+            remaining_growths: AtomicUsize::new(1000),
             oom: AtomicBool::new(false),
         }))
     }
@@ -640,9 +640,21 @@ pub fn make_api_calls(api: generators::api::ApiCalls) {
 /// Executes the wast `test` with the `config` specified.
 ///
 /// Ensures that wast tests pass regardless of the `Config`.
-pub fn wast_test(fuzz_config: generators::Config, test: generators::WastTest) {
+pub fn wast_test(mut fuzz_config: generators::Config, test: generators::WastTest) {
     crate::init_fuzzing();
-    if !fuzz_config.is_wast_test_compliant() {
+    let test = &test.test;
+
+    // Discard tests that allocate a lot of memory as we don't want to OOM the
+    // fuzzer and we also limit memory growth which would cause the test to
+    // fail.
+    if test.config.hogs_memory.unwrap_or(false) {
+        return;
+    }
+
+    // Transform `fuzz_config` to be valid for `test` and make sure that this
+    // test is supposed to pass.
+    let wast_config = fuzz_config.make_wast_test_compliant(test);
+    if test.should_fail(&wast_config) {
         return;
     }
 
@@ -654,16 +666,16 @@ pub fn wast_test(fuzz_config: generators::Config, test: generators::WastTest) {
         }
     }
 
-    log::debug!("running {:?}", test.file);
+    log::debug!("running {:?}", test.path);
     let mut wast_context = WastContext::new(fuzz_config.to_store());
     wast_context
         .register_spectest(&wasmtime_wast::SpectestConfig {
-            use_shared_memory: false,
+            use_shared_memory: true,
             suppress_prints: true,
         })
         .unwrap();
     wast_context
-        .run_buffer(test.file, test.contents.as_bytes())
+        .run_buffer(test.path.to_str().unwrap(), test.contents.as_bytes())
         .unwrap();
 }
 
@@ -976,7 +988,7 @@ pub fn dynamic_component_api_target(input: &mut arbitrary::Unstructured) -> arbi
     while input.arbitrary()? {
         let params = param_tys
             .iter()
-            .map(|ty| component_types::arbitrary_val(ty, input))
+            .map(|(_, ty)| component_types::arbitrary_val(ty, input))
             .collect::<arbitrary::Result<Vec<_>>>()?;
         let results = result_tys
             .iter()
@@ -1265,7 +1277,8 @@ mod tests {
             | WasmFeatures::WIDE_ARITHMETIC
             | WasmFeatures::MEMORY64
             | WasmFeatures::GC_TYPES
-            | WasmFeatures::CUSTOM_PAGE_SIZES;
+            | WasmFeatures::CUSTOM_PAGE_SIZES
+            | WasmFeatures::EXTENDED_CONST;
 
         // All other features that wasmparser supports, which is presumably a
         // superset of the features that wasm-smith supports, are listed here as

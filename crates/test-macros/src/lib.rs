@@ -29,7 +29,6 @@
 //! If the wasm feature is not supported by any of the compiler strategies, no
 //! tests will be generated for such strategy.
 use proc_macro::TokenStream;
-use proc_macro2::Span;
 use quote::{quote, ToTokens, TokenStreamExt};
 use syn::{
     braced,
@@ -37,18 +36,14 @@ use syn::{
     parse::{Parse, ParseStream},
     parse_macro_input, token, Attribute, Ident, Result, ReturnType, Signature, Visibility,
 };
+use wasmtime_wast_util::Compiler;
 
 /// Test configuration.
 struct TestConfig {
-    /// Supported compiler strategies.
-    strategies: Vec<Ident>,
-    /// Known WebAssembly features that will be turned on by default in the
-    /// resulting Config.
-    /// The identifiers in this list are features that are off by default in
-    /// Wasmtime's Config, which will be explicitly turned on for a given test.
-    wasm_features: Vec<Ident>,
-    /// Flag to track if there are Wasm features not supported by Winch.
-    wasm_features_unsupported_by_winch: bool,
+    strategies: Vec<Compiler>,
+    flags: wasmtime_wast_util::TestConfig,
+    /// The test attribute to use. Defaults to `#[test]`.
+    test_attribute: Option<proc_macro2::TokenStream>,
 }
 
 impl TestConfig {
@@ -56,9 +51,11 @@ impl TestConfig {
         meta.parse_nested_meta(|meta| {
             if meta.path.is_ident("not") {
                 meta.parse_nested_meta(|meta| {
-                    if meta.path.is_ident("Winch") || meta.path.is_ident("Cranelift") {
-                        let id = meta.path.require_ident()?.clone();
-                        self.strategies.retain(|s| *s != id);
+                    if meta.path.is_ident("Winch") {
+                        self.strategies.retain(|s| *s != Compiler::Winch);
+                        Ok(())
+                    } else if meta.path.is_ident("Cranelift") {
+                        self.strategies.retain(|s| *s != Compiler::CraneliftNative);
                         Ok(())
                     } else {
                         Err(meta.error("Unknown strategy"))
@@ -78,32 +75,21 @@ impl TestConfig {
 
     fn wasm_features_from(&mut self, meta: &ParseNestedMeta) -> Result<()> {
         meta.parse_nested_meta(|meta| {
-            if meta.path.is_ident("gc") || meta.path.is_ident("function_references") {
-                let feature = meta.path.require_ident()?.clone();
-                self.wasm_features.push(feature.clone());
-                self.wasm_features_unsupported_by_winch = true;
-                Ok(())
-            } else if meta.path.is_ident("simd")
-                || meta.path.is_ident("relaxed_simd")
-                || meta.path.is_ident("reference_types")
-                || meta.path.is_ident("tail_call")
-                || meta.path.is_ident("threads")
-            {
-                self.wasm_features_unsupported_by_winch = true;
-                Ok(())
-            } else {
-                Err(meta.error("Unsupported wasm feature"))
+            for (feature, enabled) in self.flags.options_mut() {
+                if meta.path.is_ident(feature) {
+                    *enabled = Some(true);
+                    return Ok(());
+                }
             }
+            Err(meta.error("Unsupported test feature"))
         })?;
 
-        if self.wasm_features.len() > 2 {
-            return Err(meta.error("Expected at most 2 off-by-default wasm features"));
-        }
+        Ok(())
+    }
 
-        if self.wasm_features_unsupported_by_winch {
-            self.strategies.retain(|s| s.to_string() != "Winch");
-        }
-
+    fn test_attribute_from(&mut self, meta: &ParseNestedMeta) -> Result<()> {
+        let v: syn::LitStr = meta.value()?.parse()?;
+        self.test_attribute = Some(v.value().parse()?);
         Ok(())
     }
 }
@@ -111,12 +97,9 @@ impl TestConfig {
 impl Default for TestConfig {
     fn default() -> Self {
         Self {
-            strategies: vec![
-                Ident::new("Cranelift", Span::call_site()),
-                Ident::new("Winch", Span::call_site()),
-            ],
-            wasm_features: vec![],
-            wasm_features_unsupported_by_winch: false,
+            strategies: vec![Compiler::CraneliftNative, Compiler::Winch],
+            flags: Default::default(),
+            test_attribute: None,
         }
     }
 }
@@ -191,6 +174,8 @@ pub fn wasmtime_test(attrs: TokenStream, item: TokenStream) -> TokenStream {
             test_config.strategies_from(&meta)
         } else if meta.path.is_ident("wasm_features") {
             test_config.wasm_features_from(&meta)
+        } else if meta.path.is_ident("with") {
+            test_config.test_attribute_from(&meta)
         } else {
             Err(meta.error("Unsupported attributes"))
         }
@@ -205,9 +190,7 @@ pub fn wasmtime_test(attrs: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 fn expand(test_config: &TestConfig, func: Fn) -> Result<TokenStream> {
-    let mut tests = if test_config.strategies.len() == 1
-        && test_config.strategies.get(0).map(|s| s.to_string()) == Some("Winch".to_string())
-    {
+    let mut tests = if test_config.strategies == [Compiler::Winch] {
         vec![quote! {
             // This prevents dead code warning when the macro is invoked as:
             //     #[wasmtime_test(strategies(not(Cranelift))]
@@ -220,40 +203,65 @@ fn expand(test_config: &TestConfig, func: Fn) -> Result<TokenStream> {
     };
     let attrs = &func.attrs;
 
-    for ident in &test_config.strategies {
-        let strategy_name = ident.to_string();
+    let test_attr = test_config
+        .test_attribute
+        .clone()
+        .unwrap_or_else(|| quote! { #[test] });
+
+    for strategy in &test_config.strategies {
+        let strategy_name = format!("{strategy:?}");
         // Winch currently only offers support for x64.
-        let target = if strategy_name == "Winch" {
+        let target = if *strategy == Compiler::Winch {
             quote! { #[cfg(target_arch = "x86_64")] }
         } else {
             quote! {}
         };
+        let (asyncness, await_) = if func.sig.asyncness.is_some() {
+            (quote! { async }, quote! { .await })
+        } else {
+            (quote! {}, quote! {})
+        };
         let func_name = &func.sig.ident;
-        let ret = match &func.sig.output {
+        let expect = match &func.sig.output {
             ReturnType::Default => quote! {},
-            ReturnType::Type(_, ty) => quote! { -> #ty },
+            ReturnType::Type(..) => quote! { .expect("test is expected to pass") },
         };
         let test_name = Ident::new(
             &format!("{}_{}", strategy_name.to_lowercase(), func_name),
             func_name.span(),
         );
 
-        let config_setup = test_config.wasm_features.iter().map(|f| {
-            let method_name = Ident::new(&format!("wasm_{f}"), f.span());
-            quote! {
-                config.#method_name(true);
-            }
-        });
+        let should_panic = if strategy.should_fail(&test_config.flags) {
+            quote!(#[should_panic])
+        } else {
+            quote!()
+        };
+
+        let test_config = format!("wasmtime_wast_util::{:?}", test_config.flags)
+            .parse::<proc_macro2::TokenStream>()
+            .unwrap();
+        let strategy_ident = quote::format_ident!("{strategy_name}");
 
         let tok = quote! {
-            #[test]
+            #test_attr
             #target
+            #should_panic
             #(#attrs)*
-            fn #test_name() #ret {
+            #asyncness fn #test_name() {
                 let mut config = Config::new();
-                config.strategy(Strategy::#ident);
-                #(#config_setup)*
-                #func_name(&mut config)
+                component_test_util::apply_test_config(
+                    &mut config,
+                    &#test_config,
+                );
+                component_test_util::apply_wast_config(
+                    &mut config,
+                    &wasmtime_wast_util::WastConfig {
+                        compiler: wasmtime_wast_util::Compiler::#strategy_ident,
+                        pooling: false,
+                        collector: wasmtime_wast_util::Collector::Auto,
+                    },
+                );
+                #func_name(&mut config) #await_ #expect
             }
         };
 

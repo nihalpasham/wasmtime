@@ -12,7 +12,7 @@ use crate::masm::{
 };
 use crate::{
     abi::{self, align_to, calculate_frame_adjustment, LocalSlot},
-    codegen::{ptr_type_from_ptr_size, CodeGenContext, FuncEnv},
+    codegen::{ptr_type_from_ptr_size, CodeGenContext, Emission, FuncEnv},
     stack::{TypedReg, Val},
 };
 use crate::{
@@ -20,7 +20,10 @@ use crate::{
     masm::{SPOffset, StackSlot},
 };
 use crate::{
-    isa::reg::{writable, Reg, RegClass, WritableReg},
+    isa::{
+        reg::{writable, Reg, RegClass, WritableReg},
+        CallingConvention,
+    },
     masm::CalleeKind,
 };
 use cranelift_codegen::{
@@ -230,7 +233,7 @@ impl Masm for MacroAssembler {
     fn call(
         &mut self,
         stack_args_size: u32,
-        mut load_callee: impl FnMut(&mut Self) -> CalleeKind,
+        mut load_callee: impl FnMut(&mut Self) -> (CalleeKind, CallingConvention),
     ) -> u32 {
         let alignment: u32 = <Self::ABI as abi::ABI>::call_stack_align().into();
         let addend: u32 = <Self::ABI as abi::ABI>::arg_base_offset().into();
@@ -238,11 +241,11 @@ impl Masm for MacroAssembler {
         let aligned_args_size = align_to(stack_args_size, alignment);
         let total_stack = delta + aligned_args_size;
         self.reserve_stack(total_stack);
-        let callee = load_callee(self);
+        let (callee, cc) = load_callee(self);
         match callee {
-            CalleeKind::Indirect(reg) => self.asm.call_with_reg(reg),
-            CalleeKind::Direct(idx) => self.asm.call_with_name(idx),
-            CalleeKind::LibCall(lib) => self.asm.call_with_lib(lib, regs::scratch()),
+            CalleeKind::Indirect(reg) => self.asm.call_with_reg(cc, reg),
+            CalleeKind::Direct(idx) => self.asm.call_with_name(cc, idx),
+            CalleeKind::LibCall(lib) => self.asm.call_with_lib(cc, lib, regs::scratch()),
         };
         total_stack
     }
@@ -474,11 +477,11 @@ impl Masm for MacroAssembler {
         self.asm.xmm_and_rr(scratch_xmm, dst, size);
     }
 
-    fn float_round<F: FnMut(&mut FuncEnv<Self::Ptr>, &mut CodeGenContext, &mut Self)>(
+    fn float_round<F: FnMut(&mut FuncEnv<Self::Ptr>, &mut CodeGenContext<Emission>, &mut Self)>(
         &mut self,
         mode: RoundingMode,
         env: &mut FuncEnv<Self::Ptr>,
-        context: &mut CodeGenContext,
+        context: &mut CodeGenContext<Emission>,
         size: OperandSize,
         mut fallback: F,
     ) {
@@ -565,7 +568,12 @@ impl Masm for MacroAssembler {
         self.asm.shift_ir(imm as u8, dst, kind, size)
     }
 
-    fn shift(&mut self, context: &mut CodeGenContext, kind: ShiftKind, size: OperandSize) {
+    fn shift(
+        &mut self,
+        context: &mut CodeGenContext<Emission>,
+        kind: ShiftKind,
+        size: OperandSize,
+    ) {
         // Number of bits to shift must be in the CL register.
         let src = context.pop_to_reg(self, Some(regs::rcx()));
         let dst = context.pop_to_reg(self, None);
@@ -577,7 +585,7 @@ impl Masm for MacroAssembler {
         context.stack.push(dst.into());
     }
 
-    fn div(&mut self, context: &mut CodeGenContext, kind: DivKind, size: OperandSize) {
+    fn div(&mut self, context: &mut CodeGenContext<Emission>, kind: DivKind, size: OperandSize) {
         // Allocate rdx:rax.
         let rdx = context.reg(regs::rdx(), self);
         let rax = context.reg(regs::rax(), self);
@@ -599,7 +607,7 @@ impl Masm for MacroAssembler {
         context.stack.push(rax.into());
     }
 
-    fn rem(&mut self, context: &mut CodeGenContext, kind: RemKind, size: OperandSize) {
+    fn rem(&mut self, context: &mut CodeGenContext<Emission>, kind: RemKind, size: OperandSize) {
         // Allocate rdx:rax.
         let rdx = context.reg(regs::rdx(), self);
         let rax = context.reg(regs::rax(), self);
@@ -787,7 +795,7 @@ impl Masm for MacroAssembler {
         self.asm.jmp(target);
     }
 
-    fn popcnt(&mut self, context: &mut CodeGenContext, size: OperandSize) {
+    fn popcnt(&mut self, context: &mut CodeGenContext<Emission>, size: OperandSize) {
         let src = context.pop_to_reg(self, None);
         if self.flags.has_popcnt() && self.flags.has_sse42() {
             self.asm.popcnt(src.into(), size);
@@ -1028,7 +1036,7 @@ impl Masm for MacroAssembler {
         self.asm.sbb_rr(rhs_hi, dst_hi, OperandSize::S64);
     }
 
-    fn mul_wide(&mut self, context: &mut CodeGenContext, kind: MulWideKind) {
+    fn mul_wide(&mut self, context: &mut CodeGenContext<Emission>, kind: MulWideKind) {
         // Reserve rax/rdx since they're required by the `mul_wide` instruction
         // being used here.
         let rax = context.reg(regs::rax(), self);

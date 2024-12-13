@@ -111,9 +111,7 @@ impl Table {
         unsafe {
             let table = Table::from_wasmtime_table(wasmtime_export, store);
             let wasmtime_table = table.wasmtime_table(store, iter::empty());
-            (*wasmtime_table)
-                .fill(store.optional_gc_store_mut()?, 0, init, ty.minimum())
-                .err2anyhow()?;
+            (*wasmtime_table).fill(store.optional_gc_store_mut()?, 0, init, ty.minimum())?;
             Ok(table)
         }
     }
@@ -163,7 +161,7 @@ impl Table {
         unsafe {
             match (*table).get(gc_store, index)? {
                 runtime::TableElement::FuncRef(f) => {
-                    let func = Func::from_vm_func_ref(&mut store, f);
+                    let func = f.map(|f| Func::from_vm_func_ref(&mut store, f));
                     Some(func.into())
                 }
 
@@ -344,8 +342,7 @@ impl Table {
                 dst_index,
                 src_index,
                 len,
-            )
-            .err2anyhow()?;
+            )?;
         }
         Ok(())
     }
@@ -373,9 +370,7 @@ impl Table {
 
         let table = self.wasmtime_table(store, iter::empty());
         unsafe {
-            (*table)
-                .fill(store.optional_gc_store_mut()?, dst, val, len)
-                .err2anyhow()?;
+            (*table).fill(store.optional_gc_store_mut()?, dst, val, len)?;
         }
 
         Ok(())
@@ -446,6 +441,7 @@ impl Table {
 mod tests {
     use super::*;
     use crate::{Instance, Module, Store};
+    use wasmtime_environ::TripleExt;
 
     #[test]
     fn hash_key_is_stable_across_duplicate_store_data_entries() -> Result<()> {
@@ -457,7 +453,20 @@ mod tests {
                     (table (export "t") 1 1 externref)
                 )
             "#,
-        )?;
+        );
+        // Expect this test to fail on pulley at this time. When pulley supports
+        // externref this should switch back to using `?` on the constructor
+        // above for all platforms.
+        let module = match module {
+            Ok(module) => {
+                assert!(!store.engine().target().is_pulley());
+                module
+            }
+            Err(e) => {
+                assert!(store.engine().target().is_pulley(), "bad error {e:?}");
+                return Ok(());
+            }
+        };
         let instance = Instance::new(&mut store, &module, &[])?;
 
         // Each time we `get_table`, we call `Table::from_wasmtime` which adds

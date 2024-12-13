@@ -113,7 +113,6 @@ fn probe_engine_size(args: &Args, mpk: MpkEnabled) -> Result<Pool> {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
 struct Pool {
     num_memories: u32,
     mapped_bytes: usize,

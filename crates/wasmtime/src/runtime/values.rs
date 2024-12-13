@@ -974,14 +974,14 @@ impl Ref {
         match (self, ty.heap_type().top()) {
             (Ref::Func(None), HeapType::Func) => {
                 assert!(ty.is_nullable());
-                Ok(TableElement::FuncRef(ptr::null_mut()))
+                Ok(TableElement::FuncRef(None))
             }
             (Ref::Func(Some(f)), HeapType::Func) => {
                 debug_assert!(
                     f.comes_from_same_store(&store),
                     "checked in `ensure_matches_ty`"
                 );
-                Ok(TableElement::FuncRef(f.vm_func_ref(&mut store).as_ptr()))
+                Ok(TableElement::FuncRef(Some(f.vm_func_ref(&mut store))))
             }
 
             (Ref::Extern(e), HeapType::Extern) => match e {
@@ -1021,26 +1021,38 @@ mod tests {
     fn size_of_val() {
         // Try to keep tabs on the size of `Val` and make sure we don't grow its
         // size.
-        assert_eq!(
-            std::mem::size_of::<Val>(),
-            if cfg!(any(
-                target_arch = "x86_64",
-                target_arch = "aarch64",
-                target_arch = "riscv64",
-                target_arch = "s390x"
-            )) {
-                24
-            } else {
-                panic!("unsupported architecture")
-            }
-        );
+        let expected = if cfg!(target_arch = "x86_64")
+            || cfg!(target_arch = "aarch64")
+            || cfg!(target_arch = "s390x")
+            || cfg!(target_arch = "riscv64")
+            || cfg!(target_arch = "arm")
+        {
+            24
+        } else if cfg!(target_arch = "x86") {
+            20
+        } else {
+            panic!("unsupported architecture")
+        };
+        assert_eq!(std::mem::size_of::<Val>(), expected);
     }
 
     #[test]
     fn size_of_ref() {
         // Try to keep tabs on the size of `Ref` and make sure we don't grow its
         // size.
-        assert_eq!(std::mem::size_of::<Ref>(), 24);
+        let expected = if cfg!(target_arch = "x86_64")
+            || cfg!(target_arch = "aarch64")
+            || cfg!(target_arch = "s390x")
+            || cfg!(target_arch = "riscv64")
+            || cfg!(target_arch = "arm")
+        {
+            24
+        } else if cfg!(target_arch = "x86") {
+            20
+        } else {
+            panic!("unsupported architecture")
+        };
+        assert_eq!(std::mem::size_of::<Ref>(), expected);
     }
 
     #[test]

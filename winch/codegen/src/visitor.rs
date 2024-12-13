@@ -5,7 +5,7 @@
 //! machine code emitter.
 
 use crate::abi::RetArea;
-use crate::codegen::{control_index, Callee, CodeGen, ControlStackFrame, FnCall};
+use crate::codegen::{control_index, Callee, CodeGen, ControlStackFrame, Emission, FnCall};
 use crate::masm::{
     DivKind, ExtendKind, FloatCmpKind, IntCmpKind, MacroAssembler, MemMoveDirection, MulWideKind,
     OperandSize, RegImm, RemKind, RoundingMode, SPOffset, ShiftKind, TruncKind,
@@ -14,7 +14,9 @@ use crate::reg::{writable, Reg};
 use crate::stack::{TypedReg, Val};
 use regalloc2::RegClass;
 use smallvec::SmallVec;
-use wasmparser::{BlockType, BrTable, Ieee32, Ieee64, MemArg, VisitOperator, V128};
+use wasmparser::{
+    BlockType, BrTable, Ieee32, Ieee64, MemArg, VisitOperator, VisitSimdOperator, V128,
+};
 use wasmtime_cranelift::TRAP_INDIRECT_CALL_TO_NULL;
 use wasmtime_environ::{
     FuncIndex, GlobalIndex, MemoryIndex, TableIndex, TypeIndex, WasmHeapType, WasmValType,
@@ -251,7 +253,7 @@ macro_rules! def_unsupported {
     (emit $unsupported:tt $($rest:tt)*) => {$($rest)*};
 }
 
-impl<'a, 'translation, 'data, M> VisitOperator<'a> for CodeGen<'a, 'translation, 'data, M>
+impl<'a, 'translation, 'data, M> VisitOperator<'a> for CodeGen<'a, 'translation, 'data, M, Emission>
 where
     M: MacroAssembler,
 {
@@ -271,10 +273,6 @@ where
 
     fn visit_f64_const(&mut self, val: Ieee64) {
         self.context.stack.push(Val::f64(val));
-    }
-
-    fn visit_v128_const(&mut self, val: V128) {
-        self.context.stack.push(Val::v128(val.i128()))
     }
 
     fn visit_f32_add(&mut self) {
@@ -1428,7 +1426,8 @@ where
             self.masm,
             &mut self.context,
             Callee::Builtin(builtin.clone()),
-        )
+        );
+        self.context.pop_and_free(self.masm);
     }
 
     fn visit_table_copy(&mut self, dst: u32, src: u32) {
@@ -1444,7 +1443,8 @@ where
             self.masm,
             &mut self.context,
             Callee::Builtin(builtin),
-        )
+        );
+        self.context.pop_and_free(self.masm);
     }
 
     fn visit_table_get(&mut self, table: u32) {
@@ -1493,7 +1493,7 @@ where
             self.masm,
             &mut self.context,
             Callee::Builtin(builtin.clone()),
-        )
+        );
     }
 
     fn visit_table_size(&mut self, table: u32) {
@@ -1521,7 +1521,8 @@ where
             self.masm,
             &mut self.context,
             Callee::Builtin(builtin.clone()),
-        )
+        );
+        self.context.pop_and_free(self.masm);
     }
 
     fn visit_table_set(&mut self, table: u32) {
@@ -1581,7 +1582,8 @@ where
             self.masm,
             &mut self.context,
             Callee::Builtin(builtin),
-        )
+        );
+        self.context.pop_and_free(self.masm);
     }
 
     fn visit_memory_copy(&mut self, dst_mem: u32, src_mem: u32) {
@@ -1609,7 +1611,8 @@ where
             self.masm,
             &mut self.context,
             Callee::Builtin(builtin),
-        )
+        );
+        self.context.pop_and_free(self.masm);
     }
 
     fn visit_memory_fill(&mut self, mem: u32) {
@@ -1626,7 +1629,8 @@ where
             self.masm,
             &mut self.context,
             Callee::Builtin(builtin),
-        )
+        );
+        self.context.pop_and_free(self.masm);
     }
 
     fn visit_memory_size(&mut self, mem: u32) {
@@ -1715,10 +1719,8 @@ where
             &mut self.context,
         ));
 
-        // Emit fuel check right after binding the loop header.
-        if self.tunables.consume_fuel {
-            self.emit_fuel_check();
-        }
+        self.maybe_emit_epoch_check();
+        self.maybe_emit_fuel_check();
     }
 
     fn visit_br(&mut self, depth: u32) {
@@ -2057,14 +2059,6 @@ where
         self.emit_wasm_store(&memarg, OperandSize::S64)
     }
 
-    fn visit_v128_load(&mut self, memarg: MemArg) {
-        self.emit_wasm_load(&memarg, WasmValType::V128, OperandSize::S128, None)
-    }
-
-    fn visit_v128_store(&mut self, memarg: MemArg) {
-        self.emit_wasm_store(&memarg, OperandSize::S128)
-    }
-
     fn visit_i32_trunc_sat_f32_s(&mut self) {
         use OperandSize::*;
 
@@ -2219,10 +2213,30 @@ where
         self.masm.mul_wide(&mut self.context, MulWideKind::Unsigned);
     }
 
-    wasmparser::for_each_operator!(def_unsupported);
+    wasmparser::for_each_visit_operator!(def_unsupported);
 }
 
-impl<'a, 'translation, 'data, M> CodeGen<'a, 'translation, 'data, M>
+impl<'a, 'translation, 'data, M> VisitSimdOperator<'a>
+    for CodeGen<'a, 'translation, 'data, M, Emission>
+where
+    M: MacroAssembler,
+{
+    fn visit_v128_const(&mut self, val: V128) {
+        self.context.stack.push(Val::v128(val.i128()))
+    }
+
+    fn visit_v128_load(&mut self, memarg: MemArg) {
+        self.emit_wasm_load(&memarg, WasmValType::V128, OperandSize::S128, None)
+    }
+
+    fn visit_v128_store(&mut self, memarg: MemArg) {
+        self.emit_wasm_store(&memarg, OperandSize::S128)
+    }
+
+    wasmparser::for_each_visit_simd_operator!(def_unsupported);
+}
+
+impl<'a, 'translation, 'data, M> CodeGen<'a, 'translation, 'data, M, Emission>
 where
     M: MacroAssembler,
 {

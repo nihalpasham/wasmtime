@@ -29,14 +29,18 @@
 //! `suspend`, which has 0xB000 so it can find this, will read that and write
 //! its own resumption information into this slot as well.
 
+use crate::stackswitch::*;
 use crate::{RunResult, RuntimeFiberStack};
+use std::boxed::Box;
 use std::cell::Cell;
 use std::io;
 use std::ops::Range;
 use std::ptr;
 
+pub type Error = io::Error;
+
 pub struct FiberStack {
-    base: *mut u8,
+    base: BasePtr,
     len: usize,
 
     /// Stored here to ensure that when this `FiberStack` the backing storage,
@@ -44,10 +48,15 @@ pub struct FiberStack {
     storage: FiberStackStorage,
 }
 
+struct BasePtr(*mut u8);
+
+unsafe impl Send for BasePtr {}
+unsafe impl Sync for BasePtr {}
+
 enum FiberStackStorage {
-    Mmap(#[allow(dead_code)] MmapFiberStack),
+    Mmap(MmapFiberStack),
     Unmanaged(usize),
-    Custom(#[allow(dead_code)] Box<dyn RuntimeFiberStack>),
+    Custom(Box<dyn RuntimeFiberStack>),
 }
 
 impl FiberStack {
@@ -64,7 +73,7 @@ impl FiberStack {
         // region so the base and length of our stack are both offset by a
         // single page.
         Ok(FiberStack {
-            base: stack.mapping_base.wrapping_byte_add(page_size),
+            base: BasePtr(stack.mapping_base.wrapping_byte_add(page_size)),
             len: stack.mapping_len - page_size,
             storage: FiberStackStorage::Mmap(stack),
         })
@@ -77,7 +86,7 @@ impl FiberStack {
             return Self::from_custom(asan::new_fiber_stack(len)?);
         }
         Ok(FiberStack {
-            base: base.add(guard_size),
+            base: BasePtr(base.add(guard_size)),
             len,
             storage: FiberStackStorage::Unmanaged(guard_size),
         })
@@ -101,28 +110,28 @@ impl FiberStack {
             "expected fiber stack end ({end_ptr:?}) to be page aligned ({page_size:#x})",
         );
         Ok(FiberStack {
-            base: start_ptr,
+            base: BasePtr(start_ptr),
             len: range.len(),
             storage: FiberStackStorage::Custom(custom),
         })
     }
 
     pub fn top(&self) -> Option<*mut u8> {
-        Some(self.base.wrapping_byte_add(self.len))
+        Some(self.base.0.wrapping_byte_add(self.len))
     }
 
     pub fn range(&self) -> Option<Range<usize>> {
-        let base = self.base as usize;
+        let base = self.base.0 as usize;
         Some(base..base + self.len)
     }
 
     pub fn guard_range(&self) -> Option<Range<*mut u8>> {
         match &self.storage {
             FiberStackStorage::Unmanaged(guard_size) => unsafe {
-                let start = self.base.sub(*guard_size);
-                Some(start..self.base)
+                let start = self.base.0.sub(*guard_size);
+                Some(start..self.base.0)
             },
-            FiberStackStorage::Mmap(mmap) => Some(mmap.mapping_base..self.base),
+            FiberStackStorage::Mmap(mmap) => Some(mmap.mapping_base..self.base.0),
             FiberStackStorage::Custom(custom) => Some(custom.guard_range()),
         }
     }
@@ -185,20 +194,6 @@ pub struct Fiber;
 pub struct Suspend {
     top_of_stack: *mut u8,
     previous: asan::PreviousStack,
-}
-
-extern "C" {
-    #[wasmtime_versioned_export_macros::versioned_link]
-    fn wasmtime_fiber_init(
-        top_of_stack: *mut u8,
-        entry: extern "C" fn(*mut u8, *mut u8),
-        entry_arg0: *mut u8,
-    );
-    #[wasmtime_versioned_export_macros::versioned_link]
-    fn wasmtime_fiber_switch(top_of_stack: *mut u8);
-    #[allow(dead_code)] // only used in inline assembly for some platforms
-    #[wasmtime_versioned_export_macros::versioned_link]
-    fn wasmtime_fiber_start();
 }
 
 extern "C" fn fiber_start<F, A, B, C>(arg0: *mut u8, top_of_stack: *mut u8)
@@ -283,25 +278,6 @@ impl Suspend {
     }
 }
 
-cfg_if::cfg_if! {
-    if #[cfg(target_arch = "aarch64")] {
-        mod aarch64;
-    } else if #[cfg(target_arch = "x86_64")] {
-        mod x86_64;
-    } else if #[cfg(target_arch = "x86")] {
-        mod x86;
-    } else if #[cfg(target_arch = "arm")] {
-        mod arm;
-    } else if #[cfg(target_arch = "s390x")] {
-        // currently `global_asm!` isn't stable on s390x so this is an external
-        // assembler file built with the `build.rs`.
-    } else if #[cfg(target_arch = "riscv64")]  {
-        mod riscv64;
-    } else {
-        compile_error!("fibers are not supported on this CPU architecture");
-    }
-}
-
 /// Support for AddressSanitizer to support stack manipulations we do in this
 /// fiber implementation.
 ///
@@ -315,6 +291,8 @@ cfg_if::cfg_if! {
 #[cfg(asan)]
 mod asan {
     use super::{FiberStack, MmapFiberStack, RuntimeFiberStack};
+    use alloc::boxed::Box;
+    use alloc::vec::Vec;
     use rustix::param::page_size;
     use std::mem::ManuallyDrop;
     use std::ops::Range;
@@ -476,6 +454,7 @@ mod asan {
 #[cfg(not(asan))]
 mod asan_disabled {
     use super::{FiberStack, RuntimeFiberStack};
+    use std::boxed::Box;
 
     #[derive(Default)]
     pub struct PreviousStack;

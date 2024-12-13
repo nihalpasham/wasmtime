@@ -43,6 +43,20 @@ fn custom_limiter_detect_os_oom_failure() -> Result<()> {
         return Ok(());
     }
 
+    // Skip this test if it looks like we're in a cross-compiled situation,
+    // and we're emulating this test for a different platform. In that
+    // scenario QEMU ignores the data rlimit, which this test relies on. See
+    // QEMU commits 5dfa88f7162f ("linux-user: do setrlimit selectively") and
+    // 055d92f8673c ("linux-user: do prlimit selectively") for more
+    // information.
+    if std::env::vars()
+        .filter(|(k, _v)| k.starts_with("CARGO_TARGET") && k.ends_with("RUNNER"))
+        .count()
+        > 0
+    {
+        return Ok(());
+    }
+
     // Default behavior of on-demand memory allocation so that a
     // memory grow will hit Linux for a larger mmap.
     let mut config = Config::new();
@@ -57,7 +71,7 @@ fn custom_limiter_detect_os_oom_failure() -> Result<()> {
         // limit process to 256MiB memory
         let rlimit = libc::rlimit {
             rlim_cur: 0,
-            rlim_max: process_max_memory as u64,
+            rlim_max: process_max_memory as libc::rlim_t,
         };
         let res = libc::setrlimit(libc::RLIMIT_DATA, &rlimit);
         assert_eq!(res, 0, "setrlimit failed: {res}");

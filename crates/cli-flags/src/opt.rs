@@ -47,7 +47,7 @@ macro_rules! wasmtime_option_group {
         }
 
         #[derive(Clone, Debug,PartialEq)]
-        #[allow(non_camel_case_types)]
+        #[expect(non_camel_case_types, reason = "macro-generated code")]
         enum $option {
             $(
                 $opt($payload),
@@ -368,6 +368,20 @@ impl WasmtimeOptionValue for wasmtime::OptLevel {
             "s" => Ok(wasmtime::OptLevel::SpeedAndSize),
             other => bail!(
                 "unknown optimization level `{}`, only 0,1,2,s accepted",
+                other
+            ),
+        }
+    }
+}
+
+impl WasmtimeOptionValue for wasmtime::RegallocAlgorithm {
+    const VAL_HELP: &'static str = "=backtracking|single-pass";
+    fn parse(val: Option<&str>) -> Result<Self> {
+        match String::parse(val)?.as_str() {
+            "backtracking" => Ok(wasmtime::RegallocAlgorithm::Backtracking),
+            "single-pass" => Ok(wasmtime::RegallocAlgorithm::SinglePass),
+            other => bail!(
+                "unknown regalloc algorithm`{}`, only backtracking,single-pass accepted",
                 other
             ),
         }

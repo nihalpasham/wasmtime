@@ -1,5 +1,6 @@
 use crate::prelude::*;
-use crate::runtime::vm::SendSyncPtr;
+use crate::runtime::vm::sys::vm::MemoryImageSource;
+use crate::runtime::vm::{HostAlignedByteCount, SendSyncPtr};
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::ops::Range;
@@ -9,6 +10,21 @@ use std::ptr::{self, NonNull};
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Storage::FileSystem::*;
 use windows_sys::Win32::System::Memory::*;
+
+/// Open a file so that it can be mmap'd for executing.
+///
+/// Open the file with read/execute access and only share for
+/// read. This will enable us to perform the proper mmap below
+/// while also disallowing other processes modifying the file
+/// and having those modifications show up in our address space.
+pub fn open_file_for_mmap(path: &Path) -> Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .access_mode(FILE_GENERIC_READ | FILE_GENERIC_EXECUTE)
+        .share_mode(FILE_SHARE_READ)
+        .open(path)
+        .context("failed to open file")
+}
 
 #[derive(Debug)]
 pub struct Mmap {
@@ -24,11 +40,11 @@ impl Mmap {
         }
     }
 
-    pub fn new(size: usize) -> Result<Self> {
+    pub fn new(size: HostAlignedByteCount) -> Result<Self> {
         let ptr = unsafe {
             VirtualAlloc(
                 ptr::null_mut(),
-                size,
+                size.byte_count(),
                 MEM_RESERVE | MEM_COMMIT,
                 PAGE_READWRITE,
             )
@@ -37,7 +53,7 @@ impl Mmap {
             bail!(io::Error::last_os_error())
         }
 
-        let memory = std::ptr::slice_from_raw_parts_mut(ptr.cast(), size);
+        let memory = std::ptr::slice_from_raw_parts_mut(ptr.cast(), size.byte_count());
         let memory = SendSyncPtr::new(NonNull::new(memory).unwrap());
         Ok(Self {
             memory,
@@ -45,12 +61,19 @@ impl Mmap {
         })
     }
 
-    pub fn reserve(size: usize) -> Result<Self> {
-        let ptr = unsafe { VirtualAlloc(ptr::null_mut(), size, MEM_RESERVE, PAGE_NOACCESS) };
+    pub fn reserve(size: HostAlignedByteCount) -> Result<Self> {
+        let ptr = unsafe {
+            VirtualAlloc(
+                ptr::null_mut(),
+                size.byte_count(),
+                MEM_RESERVE,
+                PAGE_NOACCESS,
+            )
+        };
         if ptr.is_null() {
             bail!(io::Error::last_os_error())
         }
-        let memory = std::ptr::slice_from_raw_parts_mut(ptr.cast(), size);
+        let memory = std::ptr::slice_from_raw_parts_mut(ptr.cast(), size.byte_count());
         let memory = SendSyncPtr::new(NonNull::new(memory).unwrap());
         Ok(Self {
             memory,
@@ -58,23 +81,10 @@ impl Mmap {
         })
     }
 
-    pub fn from_file(path: &Path) -> Result<(Self, File)> {
+    pub fn from_file(file: &File) -> Result<Self> {
         unsafe {
-            // Open the file with read/execute access and only share for
-            // read. This will enable us to perform the proper mmap below
-            // while also disallowing other processes modifying the file
-            // and having those modifications show up in our address space.
-            let file = OpenOptions::new()
-                .read(true)
-                .access_mode(FILE_GENERIC_READ | FILE_GENERIC_EXECUTE)
-                .share_mode(FILE_SHARE_READ)
-                .open(path)
-                .err2anyhow()
-                .context("failed to open file")?;
-
             let len = file
                 .metadata()
-                .err2anyhow()
                 .context("failed to get file metadata")?
                 .len();
             let len = usize::try_from(len).map_err(|_| anyhow!("file too large to map"))?;
@@ -94,8 +104,7 @@ impl Mmap {
                 ptr::null(),
             );
             if mapping == INVALID_HANDLE_VALUE {
-                return Err(io::Error::last_os_error().into_anyhow())
-                    .context("failed to create file mapping");
+                return Err(io::Error::last_os_error()).context("failed to create file mapping");
             }
 
             // Create a view for the entire file using all our requisite
@@ -112,8 +121,7 @@ impl Mmap {
             let err = io::Error::last_os_error();
             CloseHandle(mapping);
             if ptr.is_null() {
-                return Err(err.into_anyhow())
-                    .context(format!("failed to create map view of {:#x} bytes", len));
+                return Err(err).context(format!("failed to create map view of {:#x} bytes", len));
             }
 
             let memory = std::ptr::slice_from_raw_parts_mut(ptr.cast(), len);
@@ -126,20 +134,33 @@ impl Mmap {
             // Protect the entire file as PAGE_WRITECOPY to start (i.e.
             // remove the execute bit)
             let mut old = 0;
-            if VirtualProtect(ret.as_mut_ptr().cast(), ret.len(), PAGE_WRITECOPY, &mut old) == 0 {
-                return Err(io::Error::last_os_error().into_anyhow())
+            if VirtualProtect(
+                ret.as_send_sync_ptr().as_ptr().cast(),
+                ret.len(),
+                PAGE_WRITECOPY,
+                &mut old,
+            ) == 0
+            {
+                return Err(io::Error::last_os_error())
                     .context("failed change pages to `PAGE_READONLY`");
             }
 
-            Ok((ret, file))
+            Ok(ret)
         }
     }
 
-    pub fn make_accessible(&mut self, start: usize, len: usize) -> Result<()> {
+    pub unsafe fn make_accessible(
+        &self,
+        start: HostAlignedByteCount,
+        len: HostAlignedByteCount,
+    ) -> Result<()> {
         if unsafe {
             VirtualAlloc(
-                self.as_ptr().add(start) as _,
-                len,
+                self.as_send_sync_ptr()
+                    .as_ptr()
+                    .add(start.byte_count())
+                    .cast(),
+                len.byte_count(),
                 MEM_COMMIT,
                 PAGE_READWRITE,
             )
@@ -153,13 +174,8 @@ impl Mmap {
     }
 
     #[inline]
-    pub fn as_ptr(&self) -> *const u8 {
-        self.memory.as_ptr() as *const u8
-    }
-
-    #[inline]
-    pub fn as_mut_ptr(&self) -> *mut u8 {
-        self.memory.as_ptr().cast()
+    pub fn as_send_sync_ptr(&self) -> SendSyncPtr<u8> {
+        self.memory.cast()
     }
 
     #[inline]
@@ -180,8 +196,8 @@ impl Mmap {
             PAGE_EXECUTE_READ
         };
         let mut old = 0;
-        let base = self.as_ptr().add(range.start);
-        let result = VirtualProtect(base as _, range.end - range.start, flags, &mut old);
+        let base = self.as_send_sync_ptr().as_ptr().add(range.start).cast();
+        let result = VirtualProtect(base, range.end - range.start, flags, &mut old);
         if result == 0 {
             bail!(io::Error::last_os_error());
         }
@@ -190,12 +206,22 @@ impl Mmap {
 
     pub unsafe fn make_readonly(&self, range: Range<usize>) -> Result<()> {
         let mut old = 0;
-        let base = self.as_ptr().add(range.start);
-        let result = VirtualProtect(base as _, range.end - range.start, PAGE_READONLY, &mut old);
+        let base = self.as_send_sync_ptr().as_ptr().add(range.start).cast();
+        let result = VirtualProtect(base, range.end - range.start, PAGE_READONLY, &mut old);
         if result == 0 {
             bail!(io::Error::last_os_error());
         }
         Ok(())
+    }
+
+    pub unsafe fn map_image_at(
+        &self,
+        image_source: &MemoryImageSource,
+        _source_offset: u64,
+        _memory_offset: HostAlignedByteCount,
+        _memory_len: HostAlignedByteCount,
+    ) -> Result<()> {
+        match *image_source {}
     }
 }
 
@@ -208,12 +234,12 @@ impl Drop for Mmap {
         if self.is_file {
             let r = unsafe {
                 UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS {
-                    Value: self.as_mut_ptr().cast(),
+                    Value: self.memory.as_ptr().cast(),
                 })
             };
             assert_ne!(r, 0);
         } else {
-            let r = unsafe { VirtualFree(self.as_mut_ptr().cast(), 0, MEM_RELEASE) };
+            let r = unsafe { VirtualFree(self.memory.as_ptr().cast(), 0, MEM_RELEASE) };
             assert_ne!(r, 0);
         }
     }

@@ -189,9 +189,7 @@ fn bench_host_to_wasm<Params, Results>(
             for (i, param) in params.iter().enumerate() {
                 space[i] = param.to_raw(&mut *store).unwrap();
             }
-            untyped
-                .call_unchecked(&mut *store, space.as_mut_ptr(), space.len())
-                .unwrap();
+            untyped.call_unchecked(&mut *store, &mut space[..]).unwrap();
             for (i, expected) in results.iter().enumerate() {
                 let ty = expected.ty(&store).unwrap();
                 let actual = Val::from_raw(&mut *store, space[i], ty);
@@ -445,7 +443,7 @@ trait ToVals {
 
 macro_rules! tuples {
     ($($t:ident)*) => (
-        #[allow(non_snake_case)]
+        #[allow(non_snake_case, reason = "macro-generated code")]
         impl<$($t:Copy + Into<Val>,)*> ToVals for ($($t,)*) {
             fn to_vals(&self) -> Vec<Val> {
                 let mut _dst = Vec::new();
@@ -534,7 +532,7 @@ mod component {
 
     macro_rules! tuples {
         ($($t:ident)*) => (
-            #[allow(non_snake_case)]
+            #[allow(non_snake_case, reason = "macro-generated code")]
             impl<$($t:Copy + ToComponentVal,)*> ToComponentVals for ($($t,)*) {
                 fn to_component_vals(&self) -> Vec<component::Val> {
                     let mut _dst = Vec::new();

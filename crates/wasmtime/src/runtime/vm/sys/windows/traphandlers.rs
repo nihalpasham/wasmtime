@@ -1,3 +1,4 @@
+use crate::prelude::*;
 use crate::runtime::vm::traphandlers::{tls, TrapRegisters, TrapTest};
 use crate::runtime::vm::VMContext;
 use std::ffi::c_void;
@@ -12,17 +13,17 @@ extern "C" {
     #[allow(improper_ctypes)]
     pub fn wasmtime_setjmp(
         jmp_buf: *mut *const u8,
-        callback: extern "C" fn(*mut u8, *mut VMContext),
+        callback: extern "C" fn(*mut u8, *mut VMContext) -> bool,
         payload: *mut u8,
         callee: *mut VMContext,
-    ) -> i32;
+    ) -> bool;
 
     #[wasmtime_versioned_export_macros::versioned_link]
     pub fn wasmtime_longjmp(jmp_buf: *const u8) -> !;
 }
 
 /// Function which may handle custom signals while processing traps.
-pub type SignalHandler<'a> = dyn Fn(*mut EXCEPTION_POINTERS) -> bool + Send + Sync + 'a;
+pub type SignalHandler = Box<dyn Fn(*mut EXCEPTION_POINTERS) -> bool + Send + Sync>;
 
 pub struct TrapHandler {
     handle: *mut c_void,

@@ -22,7 +22,7 @@ pub struct TrapInformation {
 // These need to be kept in sync.
 #[non_exhaustive]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-#[allow(missing_docs)]
+#[allow(missing_docs, reason = "self-describing variants")]
 pub enum Trap {
     /// The current stack space was exhausted.
     StackOverflow,
@@ -159,8 +159,7 @@ impl fmt::Display for Trap {
     }
 }
 
-#[cfg(feature = "std")]
-impl std::error::Error for Trap {}
+impl core::error::Error for Trap {}
 
 /// Decodes the provided trap information section and attempts to find the trap
 /// code corresponding to the `offset` specified.

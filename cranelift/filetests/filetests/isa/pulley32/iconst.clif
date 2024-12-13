@@ -9,12 +9,12 @@ block0:
 
 ; VCode:
 ; block0:
-;   x0 = xconst16 255
+;   xconst16 x0, 255
 ;   ret
 ;
 ; Disassembled:
-;        0: 15 00 ff 00                     xconst16 x0, 255
-;        4: 00                              ret
+; xconst16 x0, 255
+; ret
 
 function %i16() -> i16 {
 block0:
@@ -24,12 +24,12 @@ block0:
 
 ; VCode:
 ; block0:
-;   x0 = xconst32 65535
+;   xconst32 x0, 65535
 ;   ret
 ;
 ; Disassembled:
-;        0: 16 00 ff ff 00 00               xconst32 x0, 65535
-;        6: 00                              ret
+; xconst32 x0, 65535
+; ret
 
 function %i32() -> i32 {
 block0:
@@ -39,12 +39,12 @@ block0:
 
 ; VCode:
 ; block0:
-;   x0 = xconst32 -1
+;   xconst32 x0, -1
 ;   ret
 ;
 ; Disassembled:
-;        0: 16 00 ff ff ff ff               xconst32 x0, -1
-;        6: 00                              ret
+; xconst32 x0, -1
+; ret
 
 function %i64() -> i64 {
 block0:
@@ -54,10 +54,10 @@ block0:
 
 ; VCode:
 ; block0:
-;   x0 = xconst64 -1
+;   xconst64 x0, -1
 ;   ret
 ;
 ; Disassembled:
-;        0: 17 00 ff ff ff ff ff ff ff ff   xconst64 x0, -1
-;        a: 00                              ret
+; xconst64 x0, -1
+; ret
 

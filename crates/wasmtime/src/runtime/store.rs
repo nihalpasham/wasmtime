@@ -84,8 +84,9 @@ use crate::prelude::*;
 use crate::runtime::vm::mpk::{self, ProtectionKey, ProtectionMask};
 use crate::runtime::vm::{
     Backtrace, ExportGlobal, GcRootsList, GcStore, InstanceAllocationRequest, InstanceAllocator,
-    InstanceHandle, ModuleRuntimeInfo, OnDemandInstanceAllocator, SignalHandler, StoreBox,
-    StorePtr, VMContext, VMFuncRef, VMGcRef, VMRuntimeLimits, WasmFault,
+    InstanceHandle, Interpreter, InterpreterRef, ModuleRuntimeInfo, OnDemandInstanceAllocator,
+    SignalHandler, StoreBox, StorePtr, Unwind, UnwindHost, UnwindPulley, VMContext, VMFuncRef,
+    VMGcRef, VMRuntimeLimits,
 };
 use crate::trampoline::VMHostGlobalContext;
 use crate::type_registry::RegisteredType;
@@ -103,6 +104,7 @@ use core::ops::{Deref, DerefMut, Range};
 use core::pin::Pin;
 use core::ptr;
 use core::task::{Context, Poll};
+use wasmtime_environ::TripleExt;
 
 mod context;
 pub use self::context::*;
@@ -314,7 +316,7 @@ pub struct StoreOpaque {
     instances: Vec<StoreInstance>,
     #[cfg(feature = "component-model")]
     num_component_instances: usize,
-    signal_handler: Option<Box<SignalHandler<'static>>>,
+    signal_handler: Option<SignalHandler>,
     modules: ModuleRegistry,
     func_refs: FuncRefs,
     host_globals: Vec<StoreBox<VMHostGlobalContext>>,
@@ -335,6 +337,7 @@ pub struct StoreOpaque {
     table_limit: usize,
     #[cfg(feature = "async")]
     async_state: AsyncState,
+
     // If fuel_yield_interval is enabled, then we store the remaining fuel (that isn't in
     // runtime_limits) here. The total amount of fuel is the runtime limits and reserve added
     // together. Then when we run out of gas, we inject the yield amount from the reserve
@@ -386,12 +389,19 @@ pub struct StoreOpaque {
     component_calls: crate::runtime::vm::component::CallContexts,
     #[cfg(feature = "component-model")]
     host_resource_data: crate::component::HostResourceData,
+
+    /// State related to the Pulley interpreter if that's enabled and configured
+    /// for this store's `Engine`. This is `None` if pulley was disabled at
+    /// compile time or if it's not being used by the `Engine`.
+    interpreter: Option<Interpreter>,
 }
 
 #[cfg(feature = "async")]
 struct AsyncState {
     current_suspend: UnsafeCell<*mut wasmtime_fiber::Suspend<Result<()>, (), Result<()>>>,
     current_poll_cx: UnsafeCell<PollContext>,
+    /// The last fiber stack that was in use by this store.
+    last_fiber_stack: Option<wasmtime_fiber::FiberStack>,
 }
 
 #[cfg(feature = "async")]
@@ -556,6 +566,7 @@ impl<T> Store<T> {
                 async_state: AsyncState {
                     current_suspend: UnsafeCell::new(ptr::null_mut()),
                     current_poll_cx: UnsafeCell::new(PollContext::default()),
+                    last_fiber_stack: None,
                 },
                 fuel_reserve: 0,
                 fuel_yield_interval: None,
@@ -571,6 +582,11 @@ impl<T> Store<T> {
                 component_calls: Default::default(),
                 #[cfg(feature = "component-model")]
                 host_resource_data: Default::default(),
+                interpreter: if cfg!(feature = "pulley") && engine.target().is_pulley() {
+                    Some(Interpreter::new())
+                } else {
+                    None
+                },
             },
             limiter: None,
             call_hook: None,
@@ -1520,7 +1536,7 @@ impl StoreOpaque {
     }
 
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // not used on all platforms
-    pub fn set_signal_handler(&mut self, handler: Option<Box<SignalHandler<'static>>>) {
+    pub fn set_signal_handler(&mut self, handler: Option<SignalHandler>) {
         self.signal_handler = handler;
     }
 
@@ -1724,7 +1740,7 @@ impl StoreOpaque {
 
         log::trace!("Begin trace GC roots :: Wasm stack");
 
-        Backtrace::trace(self.vmruntime_limits().cast_const(), |frame| {
+        Backtrace::trace(self, |frame| {
             let pc = frame.pc();
             debug_assert!(pc != 0, "we should always get a valid PC for Wasm frames");
 
@@ -1899,9 +1915,9 @@ impl StoreOpaque {
     }
 
     #[inline]
-    pub fn signal_handler(&self) -> Option<*const SignalHandler<'static>> {
+    pub fn signal_handler(&self) -> Option<*const SignalHandler> {
         let handler = self.signal_handler.as_ref()?;
-        Some(&**handler as *const _)
+        Some(handler)
     }
 
     #[inline]
@@ -1968,7 +1984,11 @@ impl StoreOpaque {
     /// with spectre mitigations enabled since the hardware fault address is
     /// always zero in these situations which means that the trapping context
     /// doesn't have enough information to report the fault address.
-    pub(crate) fn wasm_fault(&self, pc: usize, addr: usize) -> Option<WasmFault> {
+    pub(crate) fn wasm_fault(
+        &self,
+        pc: usize,
+        addr: usize,
+    ) -> Option<crate::runtime::vm::WasmFault> {
         // There are a few instances where a "close to zero" pointer is loaded
         // and we expect that to happen:
         //
@@ -2099,6 +2119,44 @@ at https://bytecodealliance.org/security.
             core::ptr::null_mut()..core::ptr::null_mut()
         }
     }
+
+    #[cfg(feature = "async")]
+    fn allocate_fiber_stack(&mut self) -> Result<wasmtime_fiber::FiberStack> {
+        if let Some(stack) = self.async_state.last_fiber_stack.take() {
+            return Ok(stack);
+        }
+        self.engine().allocator().allocate_fiber_stack()
+    }
+
+    #[cfg(feature = "async")]
+    fn deallocate_fiber_stack(&mut self, stack: wasmtime_fiber::FiberStack) {
+        self.flush_fiber_stack();
+        self.async_state.last_fiber_stack = Some(stack);
+    }
+
+    /// Releases the last fiber stack to the underlying instance allocator, if
+    /// present.
+    fn flush_fiber_stack(&mut self) {
+        #[cfg(feature = "async")]
+        if let Some(stack) = self.async_state.last_fiber_stack.take() {
+            unsafe {
+                self.engine.allocator().deallocate_fiber_stack(stack);
+            }
+        }
+    }
+
+    pub(crate) fn interpreter(&mut self) -> Option<InterpreterRef<'_>> {
+        let i = self.interpreter.as_mut()?;
+        Some(i.as_interpreter_ref())
+    }
+
+    pub(crate) fn unwinder(&self) -> &'static dyn Unwind {
+        if self.interpreter.is_some() {
+            &UnwindPulley
+        } else {
+            &UnwindHost
+        }
+    }
 }
 
 impl<T> StoreContextMut<'_, T> {
@@ -2124,13 +2182,14 @@ impl<T> StoreContextMut<'_, T> {
         debug_assert!(config.async_stack_size > 0);
 
         let mut slot = None;
-        let future = {
+        let mut future = {
             let current_poll_cx = self.0.async_state.current_poll_cx.get();
             let current_suspend = self.0.async_state.current_suspend.get();
-            let stack = self.engine().allocator().allocate_fiber_stack()?;
+            let stack = self.0.allocate_fiber_stack()?;
 
             let engine = self.engine().clone();
             let slot = &mut slot;
+            let this = &mut *self;
             let fiber = wasmtime_fiber::Fiber::new(stack, move |keep_going, suspend| {
                 // First check and see if we were interrupted/dropped, and only
                 // continue if we haven't been.
@@ -2148,7 +2207,7 @@ impl<T> StoreContextMut<'_, T> {
                     let _reset = Reset(current_suspend, *current_suspend);
                     *current_suspend = suspend;
 
-                    *slot = Some(func(self));
+                    *slot = Some(func(this));
                     Ok(())
                 }
             })?;
@@ -2163,7 +2222,12 @@ impl<T> StoreContextMut<'_, T> {
                 state: Some(crate::runtime::vm::AsyncWasmCallState::new()),
             }
         };
-        future.await?;
+        (&mut future).await?;
+        let stack = future.fiber.take().map(|f| f.into_stack());
+        drop(future);
+        if let Some(stack) = stack {
+            self.0.deallocate_fiber_stack(stack);
+        }
 
         return Ok(slot.unwrap());
 
@@ -2373,6 +2437,10 @@ impl<T> StoreContextMut<'_, T> {
         // completion.
         impl Drop for FiberFuture<'_> {
             fn drop(&mut self) {
+                if self.fiber.is_none() {
+                    return;
+                }
+
                 if !self.fiber().done() {
                     let result = self.resume(Err(anyhow!("future dropped")));
                     // This resumption with an error should always complete the
@@ -2582,7 +2650,7 @@ unsafe impl<T> crate::runtime::vm::VMStore for StoreInner<T> {
 
     fn out_of_gas(&mut self) -> Result<()> {
         if !self.refuel() {
-            return Err(Trap::OutOfFuel).err2anyhow();
+            return Err(Trap::OutOfFuel.into());
         }
         #[cfg(feature = "async")]
         if self.fuel_yield_interval.is_some() {
@@ -2596,7 +2664,7 @@ unsafe impl<T> crate::runtime::vm::VMStore for StoreInner<T> {
         // multiple times.
         let mut behavior = self.epoch_deadline_behavior.take();
         let delta_result = match &mut behavior {
-            None => Err(Trap::Interrupt).err2anyhow(),
+            None => Err(Trap::Interrupt.into()),
             Some(callback) => callback((&mut *self).as_context_mut()).and_then(|update| {
                 let delta = match update {
                     UpdateDeadline::Continue(delta) => delta,
@@ -2737,6 +2805,8 @@ impl<T: fmt::Debug> fmt::Debug for Store<T> {
 
 impl<T> Drop for Store<T> {
     fn drop(&mut self) {
+        self.inner.flush_fiber_stack();
+
         // for documentation on this `unsafe`, see `into_data`.
         unsafe {
             ManuallyDrop::drop(&mut self.inner.data);

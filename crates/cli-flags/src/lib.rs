@@ -42,6 +42,9 @@ wasmtime_option_group! {
         /// Optimization level of generated code (0-2, s; default: 2)
         pub opt_level: Option<wasmtime::OptLevel>,
 
+        /// Register allocator algorithm choice.
+        pub regalloc_algorithm: Option<wasmtime::RegallocAlgorithm>,
+
         /// Do not allow Wasm linear memories to move in the host process's
         /// address space.
         pub memory_may_move: Option<bool>,
@@ -348,6 +351,8 @@ wasmtime_option_group! {
         pub custom_page_sizes: Option<bool>,
         /// Configure support for the wide-arithmetic proposal.
         pub wide_arithmetic: Option<bool>,
+        /// Configure support for the extended-const proposal.
+        pub extended_const: Option<bool>,
     }
 
     enum Wasm {
@@ -364,28 +369,23 @@ wasmtime_option_group! {
         pub cli_exit_with_code: Option<bool>,
         /// Deprecated alias for `cli`
         pub common: Option<bool>,
-        /// Enable support for WASI neural network API (experimental)
+        /// Enable support for WASI neural network imports (experimental)
         pub nn: Option<bool>,
-        /// Enable support for WASI threading API (experimental)
+        /// Enable support for WASI threading imports (experimental). Implies preview2=false.
         pub threads: Option<bool>,
-        /// Enable support for WASI HTTP API (experimental)
+        /// Enable support for WASI HTTP imports
         pub http: Option<bool>,
-        /// Enable support for WASI config API (experimental)
+        /// Enable support for WASI config imports (experimental)
         pub config: Option<bool>,
-        /// Enable support for WASI key-value API (experimental)
+        /// Enable support for WASI key-value imports (experimental)
         pub keyvalue: Option<bool>,
         /// Inherit environment variables and file descriptors following the
         /// systemd listen fd specification (UNIX only)
         pub listenfd: Option<bool>,
         /// Grant access to the given TCP listen socket
         pub tcplisten: Vec<String>,
-        /// Implement WASI CLI APIs with preview2 primitives (experimental).
-        ///
-        /// Indicates that the implementation of WASI preview1 should be backed by
-        /// the preview2 implementation for components.
-        ///
-        /// This will become the default in the future and this option will be
-        /// removed. For now this is primarily here for testing.
+        /// Implement WASI Preview1 using new Preview2 implementation (true, default) or legacy
+        /// implementation (false)
         pub preview2: Option<bool>,
         /// Pre-load machine learning graphs (i.e., models) for use by wasi-nn.
         ///
@@ -482,6 +482,10 @@ pub struct CommonOptions {
     pub wasm: WasmOptions,
     #[arg(skip)]
     pub wasi: WasiOptions,
+
+    /// The target triple; default is the host triple
+    #[arg(long, value_name = "TARGET")]
+    pub target: Option<String>,
 }
 
 macro_rules! match_feature {
@@ -543,11 +547,7 @@ impl CommonOptions {
         Ok(())
     }
 
-    pub fn config(
-        &mut self,
-        target: Option<&str>,
-        pooling_allocator_default: Option<bool>,
-    ) -> Result<Config> {
+    pub fn config(&mut self, pooling_allocator_default: Option<bool>) -> Result<Config> {
         self.configure();
         let mut config = Config::new();
 
@@ -562,7 +562,7 @@ impl CommonOptions {
             _ => err,
         }
         match_feature! {
-            ["cranelift" : target]
+            ["cranelift" : &self.target]
             target => config.target(target)?,
             _ => err,
         }
@@ -583,6 +583,11 @@ impl CommonOptions {
         match_feature! {
             ["cranelift" : self.opts.opt_level]
             level => config.cranelift_opt_level(level),
+            _ => err,
+        }
+        match_feature! {
+            ["cranelift": self.opts.regalloc_algorithm]
+            algo => config.cranelift_regalloc_algorithm(algo),
             _ => err,
         }
         match_feature! {
@@ -639,39 +644,51 @@ impl CommonOptions {
             true => err,
         }
 
-        if let Some(max) = self
+        let memory_reservation = self
             .opts
             .memory_reservation
-            .or(self.opts.static_memory_maximum_size)
-        {
-            config.memory_reservation(max);
+            .or(self.opts.static_memory_maximum_size);
+        match_feature! {
+            ["signals-based-traps" : memory_reservation]
+            size => config.memory_reservation(size),
+            _ => err,
         }
 
-        if let Some(enable) = self.opts.static_memory_forced {
-            config.memory_may_move(!enable);
+        match_feature! {
+            ["signals-based-traps" : self.opts.static_memory_forced]
+            enable => config.memory_may_move(!enable),
+            _ => err,
         }
-        if let Some(enable) = self.opts.memory_may_move {
-            config.memory_may_move(enable);
+        match_feature! {
+            ["signals-based-traps" : self.opts.memory_may_move]
+            enable => config.memory_may_move(enable),
+            _ => err,
         }
 
-        if let Some(size) = self
+        let memory_guard_size = self
             .opts
             .static_memory_guard_size
             .or(self.opts.dynamic_memory_guard_size)
-            .or(self.opts.memory_guard_size)
-        {
-            config.memory_guard_size(size);
+            .or(self.opts.memory_guard_size);
+        match_feature! {
+            ["signals-based-traps" : memory_guard_size]
+            size => config.memory_guard_size(size),
+            _ => err,
         }
 
-        if let Some(size) = self
+        let mem_for_growth = self
             .opts
             .memory_reservation_for_growth
-            .or(self.opts.dynamic_memory_reserved_for_growth)
-        {
-            config.memory_reservation_for_growth(size);
+            .or(self.opts.dynamic_memory_reserved_for_growth);
+        match_feature! {
+            ["signals-based-traps" : mem_for_growth]
+            size => config.memory_reservation_for_growth(size),
+            _ => err,
         }
-        if let Some(enable) = self.opts.guard_before_linear_memory {
-            config.guard_before_linear_memory(enable);
+        match_feature! {
+            ["signals-based-traps" : self.opts.guard_before_linear_memory]
+            enable => config.guard_before_linear_memory(enable),
+            _ => err,
         }
         if let Some(enable) = self.opts.table_lazy_init {
             config.table_lazy_init(enable);
@@ -691,8 +708,10 @@ impl CommonOptions {
         if let Some(enable) = self.opts.memory_init_cow {
             config.memory_init_cow(enable);
         }
-        if let Some(enable) = self.opts.signals_based_traps {
-            config.signals_based_traps(enable);
+        match_feature! {
+            ["signals-based-traps" : self.opts.signals_based_traps]
+            enable => config.signals_based_traps(enable),
+            _ => err,
         }
         if let Some(enable) = self.codegen.native_unwind_info {
             config.native_unwind_info(enable);
@@ -869,6 +888,9 @@ impl CommonOptions {
         if let Some(enable) = self.wasm.wide_arithmetic.or(all) {
             config.wasm_wide_arithmetic(enable);
         }
+        if let Some(enable) = self.wasm.extended_const.or(all) {
+            config.wasm_extended_const(enable);
+        }
 
         macro_rules! handle_conditionally_compiled {
             ($(($feature:tt, $field:tt, $method:tt))*) => ($(
@@ -893,33 +915,5 @@ impl CommonOptions {
             ("gc", function_references, wasm_function_references)
         }
         Ok(())
-    }
-}
-
-impl PartialEq for CommonOptions {
-    fn eq(&self, other: &CommonOptions) -> bool {
-        let mut me = self.clone();
-        me.configure();
-        let mut other = other.clone();
-        other.configure();
-        let CommonOptions {
-            opts_raw: _,
-            codegen_raw: _,
-            debug_raw: _,
-            wasm_raw: _,
-            wasi_raw: _,
-            configured: _,
-
-            opts,
-            codegen,
-            debug,
-            wasm,
-            wasi,
-        } = me;
-        opts == other.opts
-            && codegen == other.codegen
-            && debug == other.debug
-            && wasm == other.wasm
-            && wasi == other.wasi
     }
 }

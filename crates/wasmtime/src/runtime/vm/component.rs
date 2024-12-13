@@ -97,6 +97,10 @@ pub struct ComponentInstance {
 ///   signature that this callee corresponds to.
 /// * `nargs_and_results` - the size, in units of `ValRaw`, of
 ///   `args_and_results`.
+///
+/// This function returns a `bool` which indicates whether the call succeeded
+/// or not. On failure this function records trap information in TLS which
+/// should be suitable for reading later.
 //
 // FIXME: 9 arguments is probably too many. The `data` through `string-encoding`
 // parameters should probably get packaged up into the `VMComponentContext`.
@@ -105,14 +109,14 @@ pub struct ComponentInstance {
 pub type VMLoweringCallee = extern "C" fn(
     vmctx: *mut VMOpaqueContext,
     data: *mut u8,
-    ty: TypeFuncIndex,
-    flags: InstanceFlags,
+    ty: u32,
+    flags: *mut u8,
     opt_memory: *mut VMMemoryDefinition,
     opt_realloc: *mut VMFuncRef,
-    string_encoding: StringEncoding,
+    string_encoding: u8,
     args_and_results: *mut mem::MaybeUninit<ValRaw>,
     nargs_and_results: usize,
-);
+) -> bool;
 
 /// Structure describing a lowered host function stored within a
 /// `VMComponentContext` per-lowering.
@@ -391,7 +395,7 @@ impl ComponentInstance {
         &mut self,
         idx: TrampolineIndex,
         wasm_call: NonNull<VMWasmCallFunction>,
-        array_call: VMArrayCallFunction,
+        array_call: NonNull<VMArrayCallFunction>,
         type_index: VMSharedTypeIndex,
     ) {
         unsafe {
@@ -437,7 +441,7 @@ impl ComponentInstance {
 
     unsafe fn initialize_vmctx(&mut self, store: *mut dyn VMStore) {
         *self.vmctx_plus_offset_mut(self.offsets.magic()) = VMCOMPONENT_MAGIC;
-        *self.vmctx_plus_offset_mut(self.offsets.libcalls()) = &libcalls::VMComponentLibcalls::INIT;
+        *self.vmctx_plus_offset_mut(self.offsets.builtins()) = &libcalls::VMComponentBuiltins::INIT;
         *self.vmctx_plus_offset_mut(self.offsets.store()) = store;
         *self.vmctx_plus_offset_mut(self.offsets.limits()) = (*store).vmruntime_limits();
 
@@ -731,7 +735,7 @@ impl OwnedComponentInstance {
         &mut self,
         idx: TrampolineIndex,
         wasm_call: NonNull<VMWasmCallFunction>,
-        array_call: VMArrayCallFunction,
+        array_call: NonNull<VMArrayCallFunction>,
         type_index: VMSharedTypeIndex,
     ) {
         unsafe {
@@ -798,6 +802,16 @@ pub struct InstanceFlags(SendSyncPtr<VMGlobalDefinition>);
 
 #[allow(missing_docs)]
 impl InstanceFlags {
+    /// Wraps the given pointer as an `InstanceFlags`
+    ///
+    /// # Unsafety
+    ///
+    /// This is a raw pointer argument which needs to be valid for the lifetime
+    /// that `InstanceFlags` is used.
+    pub unsafe fn from_raw(ptr: *mut u8) -> InstanceFlags {
+        InstanceFlags(SendSyncPtr::new(NonNull::new(ptr.cast()).unwrap()))
+    }
+
     #[inline]
     pub unsafe fn may_leave(&self) -> bool {
         *(*self.as_raw()).as_i32() & FLAG_MAY_LEAVE != 0

@@ -1,13 +1,22 @@
-use super::{abi::Aarch64ABI, address::Address, asm::Assembler, regs};
+use super::{
+    abi::Aarch64ABI,
+    address::Address,
+    asm::Assembler,
+    regs::{self, scratch},
+};
 use crate::{
-    abi::local::LocalSlot,
-    codegen::{ptr_type_from_ptr_size, CodeGenContext, FuncEnv},
-    isa::reg::{writable, Reg, WritableReg},
+    abi::{self, align_to, calculate_frame_adjustment, local::LocalSlot, vmctx},
+    codegen::{ptr_type_from_ptr_size, CodeGenContext, Emission, FuncEnv},
+    isa::{
+        reg::{writable, Reg, WritableReg},
+        CallingConvention,
+    },
     masm::{
         CalleeKind, DivKind, ExtendKind, FloatCmpKind, Imm as I, IntCmpKind,
         MacroAssembler as Masm, MulWideKind, OperandSize, RegImm, RemKind, RoundingMode, SPOffset,
         ShiftKind, StackSlot, TrapCode, TruncKind,
     },
+    stack::TypedReg,
 };
 use cranelift_codegen::{
     binemit::CodeOffset,
@@ -16,7 +25,7 @@ use cranelift_codegen::{
     settings, Final, MachBufferFinalized, MachLabel,
 };
 use regalloc2::RegClass;
-use wasmtime_environ::PtrSize;
+use wasmtime_environ::{PtrSize, WasmValType};
 
 /// Aarch64 MacroAssembler.
 pub(crate) struct MacroAssembler {
@@ -123,8 +132,8 @@ impl Masm for MacroAssembler {
         Address::from_shadow_sp(offset.as_u32() as i64)
     }
 
-    fn address_at_vmctx(&self, _offset: u32) -> Self::Address {
-        todo!()
+    fn address_at_vmctx(&self, offset: u32) -> Self::Address {
+        Address::offset(vmctx!(Self), offset as i64)
     }
 
     fn store_ptr(&mut self, src: Reg, dst: Self::Address) {
@@ -162,10 +171,23 @@ impl Masm for MacroAssembler {
 
     fn call(
         &mut self,
-        _stack_args_size: u32,
-        _load_callee: impl FnMut(&mut Self) -> CalleeKind,
+        stack_args_size: u32,
+        mut load_callee: impl FnMut(&mut Self) -> (CalleeKind, CallingConvention),
     ) -> u32 {
-        todo!()
+        let alignment: u32 = <Self::ABI as abi::ABI>::call_stack_align().into();
+        let addend: u32 = <Self::ABI as abi::ABI>::arg_base_offset().into();
+        let delta = calculate_frame_adjustment(self.sp_offset().as_u32(), addend, alignment);
+        let aligned_args_size = align_to(stack_args_size, alignment);
+        let total_stack = delta + aligned_args_size;
+        self.reserve_stack(total_stack);
+        let (callee, call_conv) = load_callee(self);
+        match callee {
+            CalleeKind::Indirect(reg) => self.asm.call_with_reg(reg, call_conv),
+            CalleeKind::Direct(idx) => self.asm.call_with_name(idx, call_conv),
+            CalleeKind::LibCall(lib) => self.asm.call_with_lib(lib, scratch(), call_conv),
+        }
+
+        total_stack
     }
 
     fn load(&mut self, src: Address, dst: WritableReg, size: OperandSize) {
@@ -350,11 +372,11 @@ impl Masm for MacroAssembler {
         self.asm.fabs_rr(dst.to_reg(), dst, size);
     }
 
-    fn float_round<F: FnMut(&mut FuncEnv<Self::Ptr>, &mut CodeGenContext, &mut Self)>(
+    fn float_round<F: FnMut(&mut FuncEnv<Self::Ptr>, &mut CodeGenContext<Emission>, &mut Self)>(
         &mut self,
         mode: RoundingMode,
         _env: &mut FuncEnv<Self::Ptr>,
-        context: &mut CodeGenContext,
+        context: &mut CodeGenContext<Emission>,
         size: OperandSize,
         _fallback: F,
     ) {
@@ -433,7 +455,12 @@ impl Masm for MacroAssembler {
         self.asm.shift_ir(imm, lhs, dst, kind, size)
     }
 
-    fn shift(&mut self, context: &mut CodeGenContext, kind: ShiftKind, size: OperandSize) {
+    fn shift(
+        &mut self,
+        context: &mut CodeGenContext<Emission>,
+        kind: ShiftKind,
+        size: OperandSize,
+    ) {
         let src = context.pop_to_reg(self, None);
         let dst = context.pop_to_reg(self, None);
 
@@ -444,11 +471,19 @@ impl Masm for MacroAssembler {
         context.stack.push(dst.into());
     }
 
-    fn div(&mut self, _context: &mut CodeGenContext, _kind: DivKind, _size: OperandSize) {
-        todo!()
+    fn div(&mut self, context: &mut CodeGenContext<Emission>, kind: DivKind, size: OperandSize) {
+        context.binop(self, size, |this, dividend, divisor, size| {
+            this.asm
+                .div_rrr(divisor, dividend, writable!(dividend), kind, size);
+            match size {
+                OperandSize::S32 => TypedReg::new(WasmValType::I32, dividend),
+                OperandSize::S64 => TypedReg::new(WasmValType::I64, dividend),
+                s => unreachable!("invalid size for division: {s:?}"),
+            }
+        })
     }
 
-    fn rem(&mut self, _context: &mut CodeGenContext, _kind: RemKind, _size: OperandSize) {
+    fn rem(&mut self, _context: &mut CodeGenContext<Emission>, _kind: RemKind, _size: OperandSize) {
         todo!()
     }
 
@@ -456,7 +491,7 @@ impl Masm for MacroAssembler {
         self.asm.load_constant(0, reg);
     }
 
-    fn popcnt(&mut self, context: &mut CodeGenContext, size: OperandSize) {
+    fn popcnt(&mut self, context: &mut CodeGenContext<Emission>, size: OperandSize) {
         let src = context.pop_to_reg(self, None);
         let tmp = regs::float_scratch();
         self.asm.mov_to_fpu(src.into(), writable!(tmp), size);
@@ -511,12 +546,12 @@ impl Masm for MacroAssembler {
         todo!()
     }
 
-    fn reinterpret_float_as_int(&mut self, _dst: WritableReg, _src: Reg, _size: OperandSize) {
-        todo!()
+    fn reinterpret_float_as_int(&mut self, dst: WritableReg, src: Reg, size: OperandSize) {
+        self.asm.fpu_to_int(src, dst, size);
     }
 
-    fn reinterpret_int_as_float(&mut self, _dst: WritableReg, _src: Reg, _size: OperandSize) {
-        todo!()
+    fn reinterpret_int_as_float(&mut self, dst: WritableReg, src: Reg, size: OperandSize) {
+        self.asm.int_to_fpu(src, dst, size);
     }
 
     fn demote(&mut self, dst: WritableReg, src: Reg) {
@@ -654,8 +689,8 @@ impl Masm for MacroAssembler {
         self.asm.udf(code);
     }
 
-    fn trapz(&mut self, _src: Reg, _code: TrapCode) {
-        todo!()
+    fn trapz(&mut self, src: Reg, code: TrapCode) {
+        self.asm.trapz(src, code);
     }
 
     fn trapif(&mut self, cc: IntCmpKind, code: TrapCode) {
@@ -700,7 +735,7 @@ impl Masm for MacroAssembler {
         todo!()
     }
 
-    fn mul_wide(&mut self, context: &mut CodeGenContext, kind: MulWideKind) {
+    fn mul_wide(&mut self, context: &mut CodeGenContext<Emission>, kind: MulWideKind) {
         let _ = (context, kind);
         todo!()
     }

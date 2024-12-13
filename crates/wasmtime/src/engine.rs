@@ -1,5 +1,7 @@
 use crate::prelude::*;
 #[cfg(feature = "runtime")]
+pub use crate::runtime::code_memory::CustomCodeMemory;
+#[cfg(feature = "runtime")]
 use crate::runtime::type_registry::TypeRegistry;
 #[cfg(feature = "runtime")]
 use crate::runtime::vm::GcRuntime;
@@ -11,7 +13,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use object::write::{Object, StandardSegment};
 use object::SectionKind;
 #[cfg(feature = "std")]
-use std::path::Path;
+use std::{fs::File, path::Path};
 use wasmparser::WasmFeatures;
 use wasmtime_environ::obj;
 use wasmtime_environ::{FlagValue, ObjectKind, Tunables};
@@ -97,9 +99,8 @@ impl Engine {
             // configured. This is the per-program initialization required for
             // handling traps, such as configuring signals, vectored exception
             // handlers, etc.
+            #[cfg(all(feature = "signals-based-traps", not(miri)))]
             crate::runtime::vm::init_traps(config.macos_use_mach_ports);
-            #[cfg(feature = "debug-builtins")]
-            crate::runtime::vm::debug_builtins::ensure_exported();
         }
 
         #[cfg(any(feature = "cranelift", feature = "winch"))]
@@ -256,11 +257,35 @@ impl Engine {
     fn _check_compatible_with_native_host(&self) -> Result<(), String> {
         #[cfg(any(feature = "cranelift", feature = "winch"))]
         {
+            use target_lexicon::Triple;
+            use wasmtime_environ::TripleExt;
+
             let compiler = self.compiler();
 
-            // Check to see that the config's target matches the host
             let target = compiler.triple();
-            if *target != target_lexicon::Triple::host() {
+            let host = Triple::host();
+            let target_matches_host = || {
+                // If the host target and target triple match, then it's valid
+                // to run results of compilation on this host.
+                if host == *target {
+                    return true;
+                }
+
+                // If there's a mismatch and the target is a compatible pulley
+                // target, then that's also ok to run.
+                if cfg!(feature = "pulley")
+                    && target.is_pulley()
+                    && target.pointer_width() == host.pointer_width()
+                    && target.endianness() == host.endianness()
+                {
+                    return true;
+                }
+
+                // ... otherwise everything else is considered not a match.
+                false
+            };
+
+            if !target_matches_host() {
                 return Err(format!(
                     "target '{target}' specified in the configuration does not match the host"
                 ));
@@ -351,6 +376,7 @@ impl Engine {
             | "enable_pcc"
             | "regalloc_checker"
             | "regalloc_verbose_logs"
+            | "regalloc_algorithm"
             | "is_pic"
             | "bb_padding_log2_minus_one"
             | "machine_code_cfg_info"
@@ -394,6 +420,22 @@ impl Engine {
             // Fall through below where we test at runtime that features are
             // available.
             FlagValue::Bool(true) => {}
+
+            // Pulley's pointer_width must match the host.
+            FlagValue::Enum("pointer32") => {
+                return if cfg!(target_pointer_width = "32") {
+                    Ok(())
+                } else {
+                    Err("wrong host pointer width".to_string())
+                }
+            }
+            FlagValue::Enum("pointer64") => {
+                return if cfg!(target_pointer_width = "64") {
+                    Ok(())
+                } else {
+                    Err("wrong host pointer width".to_string())
+                }
+            }
 
             // Only `bool` values are supported right now, other settings would
             // need more support here.
@@ -445,6 +487,12 @@ impl Engine {
             "has_avx512vl" => "avx512vl",
             "has_avx512vbmi" => "avx512vbmi",
             "has_lzcnt" => "lzcnt",
+
+            // pulley features
+            "big_endian" if cfg!(target_endian = "big") => return Ok(()),
+            "big_endian" if cfg!(target_endian = "little") => {
+                return Err("wrong host endianness".to_string())
+            }
 
             _ => {
                 // FIXME: should enumerate risc-v features and plumb them
@@ -609,6 +657,11 @@ impl Engine {
         &self.inner.signatures
     }
 
+    #[cfg(feature = "runtime")]
+    pub(crate) fn custom_code_memory(&self) -> Option<&Arc<dyn CustomCodeMemory>> {
+        self.config().custom_code_memory.as_ref()
+    }
+
     pub(crate) fn epoch_counter(&self) -> &AtomicU64 {
         &self.inner.epoch
     }
@@ -676,6 +729,15 @@ impl Engine {
         (f1(), f2())
     }
 
+    /// Returns the required alignment for a code image, if we
+    /// allocate in a way that is not a system `mmap()` that naturally
+    /// aligns it.
+    fn required_code_alignment(&self) -> usize {
+        self.custom_code_memory()
+            .map(|c| c.required_alignment())
+            .unwrap_or(1)
+    }
+
     /// Loads a `CodeMemory` from the specified in-memory slice, copying it to a
     /// uniquely owned mmap.
     ///
@@ -686,20 +748,25 @@ impl Engine {
         bytes: &[u8],
         expected: ObjectKind,
     ) -> Result<Arc<crate::CodeMemory>> {
-        self.load_code(crate::runtime::vm::MmapVec::from_slice(bytes)?, expected)
+        self.load_code(
+            crate::runtime::vm::MmapVec::from_slice_with_alignment(
+                bytes,
+                self.required_code_alignment(),
+            )?,
+            expected,
+        )
     }
 
     /// Like `load_code_bytes`, but creates a mmap from a file on disk.
     #[cfg(feature = "std")]
     pub(crate) fn load_code_file(
         &self,
-        path: &Path,
+        file: File,
         expected: ObjectKind,
     ) -> Result<Arc<crate::CodeMemory>> {
         self.load_code(
-            crate::runtime::vm::MmapVec::from_file(path).with_context(|| {
-                format!("failed to create file mapping for: {}", path.display())
-            })?,
+            crate::runtime::vm::MmapVec::from_file(file)
+                .with_context(|| "Failed to create file mapping".to_string())?,
             expected,
         )
     }
@@ -710,7 +777,7 @@ impl Engine {
         expected: ObjectKind,
     ) -> Result<Arc<crate::CodeMemory>> {
         serialization::check_compatible(self, &mmap, expected)?;
-        let mut code = crate::CodeMemory::new(mmap)?;
+        let mut code = crate::CodeMemory::new(self, mmap)?;
         code.publish()?;
         Ok(Arc::new(code))
     }
@@ -762,10 +829,12 @@ impl Engine {
     /// If other crashes are seen from using this method please feel free to
     /// file an issue to update the documentation here with more preconditions
     /// that must be met.
+    #[cfg(feature = "signals-based-traps")]
     pub unsafe fn unload_process_handlers(self) {
         assert_eq!(Arc::weak_count(&self.inner), 0);
         assert_eq!(Arc::strong_count(&self.inner), 1);
 
+        #[cfg(not(miri))]
         crate::runtime::vm::deinit_traps();
     }
 }

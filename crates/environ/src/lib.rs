@@ -3,7 +3,7 @@
 //! the translation the base addresses of regions of memory that will hold the globals, tables and
 //! linear memories.
 
-#![deny(missing_docs)]
+#![deny(missing_docs, warnings)]
 #![warn(clippy::cast_sign_loss)]
 #![no_std]
 
@@ -15,10 +15,13 @@ extern crate alloc;
 pub mod prelude;
 
 mod address_map;
+#[macro_use]
 mod builtin;
 mod demangling;
 mod error;
+mod ext;
 mod gc;
+mod hostcall;
 mod module;
 mod module_artifacts;
 mod module_types;
@@ -31,11 +34,13 @@ mod tunables;
 mod types;
 mod vmoffsets;
 
+pub use self::ext::*;
 pub use crate::address_map::*;
 pub use crate::builtin::*;
 pub use crate::demangling::*;
 pub use crate::error::*;
 pub use crate::gc::*;
+pub use crate::hostcall::*;
 pub use crate::module::*;
 pub use crate::module_artifacts::*;
 pub use crate::module_types::*;
@@ -47,6 +52,8 @@ pub use crate::tunables::*;
 pub use crate::types::*;
 pub use crate::vmoffsets::*;
 pub use object;
+
+pub use wasmparser;
 
 #[cfg(feature = "compile")]
 mod compile;

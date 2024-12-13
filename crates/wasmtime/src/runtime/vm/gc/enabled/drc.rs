@@ -46,8 +46,9 @@ use super::{VMArrayRef, VMGcObjectDataMut, VMStructRef};
 use crate::hash_set::HashSet;
 use crate::prelude::*;
 use crate::runtime::vm::{
-    ExternRefHostDataId, ExternRefHostDataTable, GarbageCollection, GcHeap, GcHeapObject,
-    GcProgress, GcRootsIter, GcRuntime, Mmap, TypedGcRef, VMExternRef, VMGcHeader, VMGcRef,
+    mmap::AlignedLength, ExternRefHostDataId, ExternRefHostDataTable, GarbageCollection, GcHeap,
+    GcHeapObject, GcProgress, GcRootsIter, GcRuntime, Mmap, TypedGcRef, VMExternRef, VMGcHeader,
+    VMGcRef,
 };
 use core::ops::{Deref, DerefMut, Range};
 use core::{
@@ -90,7 +91,7 @@ struct DrcHeap {
     // NB: this box shouldn't be strictly necessary, but it makes upholding the
     // safety invariants of the `vmctx_gc_heap_data` more obviously correct.
     activations_table: Box<VMGcRefActivationsTable>,
-    heap: Mmap,
+    heap: Mmap<AlignedLength>,
     free_list: FreeList,
 }
 
@@ -549,7 +550,7 @@ unsafe impl GcHeap for DrcHeap {
 
         let size = u32::try_from(layout.size()).unwrap();
         if !VMGcKind::value_fits_in_unused_bits(size) {
-            return Err(crate::Trap::AllocationTooLarge.into_anyhow());
+            return Err(crate::Trap::AllocationTooLarge.into());
         }
 
         let gc_ref = match self.free_list.alloc(layout)? {
@@ -984,6 +985,7 @@ impl<T> DerefMut for DebugOnly<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wasmtime_environ::HostPtr;
 
     #[test]
     fn vm_drc_header_size_align() {
@@ -1018,7 +1020,7 @@ mod tests {
         let actual_offset = (ref_count_ptr as usize) - (extern_data_ptr as usize);
 
         let offsets = wasmtime_environ::VMOffsets::from(wasmtime_environ::VMOffsetsFields {
-            ptr: 8,
+            ptr: HostPtr,
             num_imported_functions: 0,
             num_imported_tables: 0,
             num_imported_memories: 0,
@@ -1046,7 +1048,7 @@ mod tests {
         let actual_offset = (next_ptr as usize) - (table_ptr as usize);
 
         let offsets = wasmtime_environ::VMOffsets::from(wasmtime_environ::VMOffsetsFields {
-            ptr: 8,
+            ptr: HostPtr,
             num_imported_functions: 0,
             num_imported_tables: 0,
             num_imported_memories: 0,
@@ -1073,7 +1075,7 @@ mod tests {
         let actual_offset = (end_ptr as usize) - (table_ptr as usize);
 
         let offsets = wasmtime_environ::VMOffsets::from(wasmtime_environ::VMOffsetsFields {
-            ptr: 8,
+            ptr: HostPtr,
             num_imported_functions: 0,
             num_imported_tables: 0,
             num_imported_memories: 0,

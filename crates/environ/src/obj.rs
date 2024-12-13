@@ -1,6 +1,8 @@
 //! Utilities for working with object files that operate as Wasmtime's
 //! serialization and intermediate format for compiled modules.
 
+use core::fmt;
+
 /// Filler for the `os_abi` field of the ELF header.
 ///
 /// This is just a constant that seems reasonable in the sense it's unlikely to
@@ -14,6 +16,12 @@ pub const EF_WASMTIME_MODULE: u32 = 1 << 0;
 /// Flag for the `e_flags` field in the ELF header indicating a compiled
 /// component.
 pub const EF_WASMTIME_COMPONENT: u32 = 1 << 1;
+
+/// Flag for the `sh_flags` field in the ELF text section that indicates that
+/// the text section does not itself need to be executable. This is used for the
+/// Pulley target, for example, to indicate that it does not need to be made
+/// natively executable as it does not contain actual native code.
+pub const SH_WASMTIME_NOT_EXECUTED: u64 = 1 << 0;
 
 /// A custom Wasmtime-specific section of our compilation image which stores
 /// mapping data from offsets in the image to offset in the original wasm
@@ -132,7 +140,7 @@ pub const ELF_WASMTIME_DWARF: &str = ".wasmtime.dwarf";
 macro_rules! libcalls {
     ($($rust:ident = $sym:tt)*) => (
         #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
-        #[allow(missing_docs)]
+        #[allow(missing_docs, reason = "self-describing variants")]
         pub enum LibCall {
             $($rust,)*
         }
@@ -171,3 +179,21 @@ libcalls! {
     FmaF64 = "libcall_fmaf64"
     X86Pshufb = "libcall_x86_pshufb"
 }
+
+/// Workaround to implement `core::error::Error` until
+/// gimli-rs/object#747 is settled.
+pub struct ObjectCrateErrorWrapper(pub object::Error);
+
+impl fmt::Debug for ObjectCrateErrorWrapper {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl fmt::Display for ObjectCrateErrorWrapper {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl core::error::Error for ObjectCrateErrorWrapper {}

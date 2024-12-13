@@ -1,7 +1,9 @@
 //! Generate Rust code from a series of Sequences.
 
 use crate::files::Files;
-use crate::sema::{ExternalSig, ReturnKind, Sym, Term, TermEnv, TermId, Type, TypeEnv, TypeId};
+use crate::sema::{
+    BuiltinType, ExternalSig, ReturnKind, Term, TermEnv, TermId, Type, TypeEnv, TypeId,
+};
 use crate::serialize::{Block, ControlFlow, EvalStep, MatchArm};
 use crate::stablemapset::StableSet;
 use crate::trie_again::{Binding, BindingId, Constraint, RuleSet};
@@ -379,6 +381,7 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
 
     fn type_name(&self, typeid: TypeId, by_ref: bool) -> String {
         match self.typeenv.types[typeid.index()] {
+            Type::Builtin(bt) => String::from(bt.name()),
             Type::Primitive(_, sym, _) => self.typeenv.syms[sym.index()].clone(),
             Type::Enum { name, .. } => {
                 let r = if by_ref { "&" } else { "" };
@@ -410,14 +413,9 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
 
             writeln!(ctx.out, "{}    ctx: &mut C,", &ctx.indent)?;
             for (i, &ty) in sig.param_tys.iter().enumerate() {
-                let (is_ref, sym) = self.ty(ty);
+                let (is_ref, ty) = self.ty(ty);
                 write!(ctx.out, "{}    arg{}: ", &ctx.indent, i)?;
-                write!(
-                    ctx.out,
-                    "{}{}",
-                    if is_ref { "&" } else { "" },
-                    &self.typeenv.syms[sym.index()]
-                )?;
+                write!(ctx.out, "{}{}", if is_ref { "&" } else { "" }, ty)?;
                 if let Some(binding) = ctx.ruleset.find_binding(&Binding::Argument {
                     index: i.try_into().unwrap(),
                 }) {
@@ -427,7 +425,6 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
             }
 
             let (_, ret) = self.ty(sig.ret_tys[0]);
-            let ret = &self.typeenv.syms[ret.index()];
 
             if let ReturnKind::Iterator = sig.ret_kind {
                 writeln!(
@@ -471,11 +468,14 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
         Ok(())
     }
 
-    fn ty(&self, typeid: TypeId) -> (bool, Sym) {
-        match &self.typeenv.types[typeid.index()] {
-            &Type::Primitive(_, sym, _) => (false, sym),
-            &Type::Enum { name, .. } => (true, name),
-        }
+    fn ty(&self, typeid: TypeId) -> (bool, String) {
+        let ty = &self.typeenv.types[typeid.index()];
+        let name = ty.name(self.typeenv);
+        let is_ref = match ty {
+            Type::Builtin(_) | Type::Primitive(..) => false,
+            Type::Enum { .. } => true,
+        };
+        (is_ref, String::from(name))
     }
 
     fn validate_block(ret_kind: ReturnKind, block: &Block) -> Nested {
@@ -575,7 +575,9 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
                             let arm = &arms[0];
                             let scope = ctx.enter_scope();
                             match arm.constraint {
-                                Constraint::ConstInt { .. } | Constraint::ConstPrim { .. } => {
+                                Constraint::ConstBool { .. }
+                                | Constraint::ConstInt { .. }
+                                | Constraint::ConstPrim { .. } => {
                                     write!(ctx.out, "{}if ", &ctx.indent)?;
                                     self.emit_expr(ctx, *source)?;
                                     write!(ctx.out, " == ")?;
@@ -738,6 +740,7 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
             };
 
         match binding {
+            &Binding::ConstBool { val, .. } => self.emit_bool(ctx, val),
             &Binding::ConstInt { val, ty } => self.emit_int(ctx, val, ty),
             Binding::ConstPrim { val } => write!(ctx.out, "{}", &self.typeenv.syms[val.index()]),
             Binding::Argument { index } => write!(ctx.out, "arg{}", index.index()),
@@ -842,6 +845,7 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
             }
         }
         match *constraint {
+            Constraint::ConstBool { val, .. } => self.emit_bool(ctx, val),
             Constraint::ConstInt { val, ty } => self.emit_int(ctx, val, ty),
             Constraint::ConstPrim { val } => {
                 write!(ctx.out, "{}", &self.typeenv.syms[val.index()])
@@ -899,24 +903,25 @@ impl<L: Length, C> Length for ContextIterWrapper<L, C> {{
         }
     }
 
+    fn emit_bool<W: Write>(
+        &self,
+        ctx: &mut BodyContext<W>,
+        val: bool,
+    ) -> Result<(), std::fmt::Error> {
+        write!(ctx.out, "{val}")
+    }
+
     fn emit_int<W: Write>(
         &self,
         ctx: &mut BodyContext<W>,
         val: i128,
         ty: TypeId,
     ) -> Result<(), std::fmt::Error> {
-        // For the kinds of situations where we use ISLE, magic numbers are
-        // much more likely to be understandable if they're in hex rather than
-        // decimal.
-        // TODO: use better type info (https://github.com/bytecodealliance/wasmtime/issues/5431)
-        if val < 0
-            && self.typeenv.types[ty.index()]
-                .name(self.typeenv)
-                .starts_with('i')
-        {
-            write!(ctx.out, "-{:#X}", -val)
-        } else {
-            write!(ctx.out, "{val:#X}")
+        let ty_data = &self.typeenv.types[ty.index()];
+        match ty_data {
+            Type::Builtin(BuiltinType::Int(ty)) if ty.is_signed() => write!(ctx.out, "{val}_{ty}"),
+            Type::Builtin(BuiltinType::Int(ty)) => write!(ctx.out, "{val:#x}_{ty}"),
+            _ => write!(ctx.out, "{val:#x}"),
         }
     }
 }

@@ -27,7 +27,7 @@ macro_rules! define_tunables {
 
         /// Optional tunable configuration options used in `wasmtime::Config`
         #[derive(Default, Clone)]
-        #[allow(missing_docs)]
+        #[allow(missing_docs, reason = "macro-generated fields")]
         pub struct $config_tunables {
             $(pub $field: Option<$field_ty>,)*
         }
@@ -117,6 +117,9 @@ define_tunables! {
         /// Whether or not the host will be using native signals (e.g. SIGILL,
         /// SIGSEGV, etc) to implement traps.
         pub signals_based_traps: bool,
+
+        /// Whether CoW images might be used to initialize linear memories.
+        pub memory_init_cow: bool,
     }
 
     pub struct ConfigTunables {
@@ -140,6 +143,9 @@ impl Tunables {
 
     /// Returns the default set of tunables for the given target triple.
     pub fn default_for_target(target: &Triple) -> Result<Self> {
+        if cfg!(miri) {
+            return Ok(Tunables::default_miri());
+        }
         match target
             .pointer_width()
             .map_err(|_| anyhow!("failed to retrieve target pointer width"))?
@@ -151,7 +157,7 @@ impl Tunables {
     }
 
     /// Returns the default set of tunables for running under MIRI.
-    pub fn default_miri() -> Tunables {
+    pub const fn default_miri() -> Tunables {
         Tunables {
             collector: None,
 
@@ -175,11 +181,12 @@ impl Tunables {
             relaxed_simd_deterministic: false,
             winch_callable: false,
             signals_based_traps: true,
+            memory_init_cow: true,
         }
     }
 
     /// Returns the default set of tunables for running under a 32-bit host.
-    pub fn default_u32() -> Tunables {
+    pub const fn default_u32() -> Tunables {
         Tunables {
             // For 32-bit we scale way down to 10MB of reserved memory. This
             // impacts performance severely but allows us to have more than a
@@ -193,16 +200,19 @@ impl Tunables {
     }
 
     /// Returns the default set of tunables for running under a 64-bit host.
-    pub fn default_u64() -> Tunables {
+    pub const fn default_u64() -> Tunables {
         Tunables {
             // 64-bit has tons of address space to static memories can have 4gb
             // address space reservations liberally by default, allowing us to
             // help eliminate bounds checks.
             //
-            // Coupled with a 2 GiB address space guard it lets us translate
-            // wasm offsets into x86 offsets as aggressively as we can.
+            // A 32MiB default guard size is then allocated so we can remove
+            // explicit bounds checks if any static offset is less than this
+            // value. SpiderMonkey found, for example, that in a large corpus of
+            // wasm modules 20MiB was the maximum offset so this is the
+            // power-of-two-rounded up from that and matches SpiderMonkey.
             memory_reservation: 1 << 32,
-            memory_guard_size: 0x8000_0000,
+            memory_guard_size: 32 << 20,
 
             // We've got lots of address space on 64-bit so use a larger
             // grow-into-this area, but on 32-bit we aren't as lucky. Miri is

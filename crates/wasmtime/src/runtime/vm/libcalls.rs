@@ -57,10 +57,11 @@
 use crate::prelude::*;
 use crate::runtime::vm::table::{Table, TableElementType};
 use crate::runtime::vm::vmcontext::VMFuncRef;
-use crate::runtime::vm::{Instance, TrapReason, VMGcRef, VMStore};
+use crate::runtime::vm::{HostResultHasUnwindSentinel, Instance, TrapReason, VMGcRef, VMStore};
+use core::convert::Infallible;
+use core::ptr::NonNull;
 #[cfg(feature = "threads")]
 use core::time::Duration;
-use wasmtime_environ::Unsigned;
 use wasmtime_environ::{DataIndex, ElemIndex, FuncIndex, MemoryIndex, TableIndex, Trap};
 #[cfg(feature = "wmemcheck")]
 use wasmtime_wmemcheck::AccessError::{
@@ -81,18 +82,21 @@ use wasmtime_wmemcheck::AccessError::{
 ///   such.
 /// * This module delegates to the outer module (this file) which has the actual
 ///   implementation.
+///
+/// For more information on converting from host-defined values to Cranelift ABI
+/// values see the `catch_unwind_and_record_trap` function.
 pub mod raw {
     // Allow these things because of the macro and how we can't differentiate
     // between doc comments and `cfg`s.
     #![allow(unused_doc_comments, unused_attributes)]
 
-    use crate::runtime::vm::{InstanceAndStore, TrapReason, VMContext};
+    use crate::runtime::vm::{InstanceAndStore, VMContext};
 
     macro_rules! libcall {
         (
             $(
                 $( #[cfg($attr:meta)] )?
-                $name:ident( vmctx: vmctx $(, $pname:ident: $param:ident )* ) $( -> $result:ident )?;
+                $name:ident( vmctx: vmctx $(, $pname:ident: $param:ident )* ) $(-> $result:ident)?;
             )*
         ) => {
             $(
@@ -106,18 +110,15 @@ pub mod raw {
                 pub unsafe extern "C" fn $name(
                     vmctx: *mut VMContext,
                     $( $pname : libcall!(@ty $param), )*
-                ) $( -> libcall!(@ty $result))? {
+                ) $(-> libcall!(@ty $result))? {
                     $(#[cfg($attr)])?
                     {
-                        let ret = crate::runtime::vm::traphandlers::catch_unwind_and_longjmp(|| {
+                        crate::runtime::vm::traphandlers::catch_unwind_and_record_trap(|| {
                             InstanceAndStore::from_vmctx(vmctx, |pair| {
-                                {
-                                    let (instance, store) = pair.unpack_mut();
-                                    super::$name(store, instance, $($pname),*)
-                                }
+                                let (instance, store) = pair.unpack_mut();
+                                super::$name(store, instance, $($pname),*)
                             })
-                        });
-                        LibcallResult::convert(ret)
+                        })
                     }
                     $(
                         #[cfg(not($attr))]
@@ -141,55 +142,12 @@ pub mod raw {
 
         (@ty i32) => (u32);
         (@ty i64) => (u64);
-        (@ty f64) => (f64);
         (@ty u8) => (u8);
-        (@ty reference) => (u32);
+        (@ty bool) => (bool);
         (@ty pointer) => (*mut u8);
     }
 
     wasmtime_environ::foreach_builtin_function!(libcall);
-
-    // Helper trait to convert results of libcalls below into the ABI of what
-    // the libcall expects.
-    //
-    // This basically entirely exists for the `Result` implementation which
-    // "unwraps" via a throwing of a trap.
-    trait LibcallResult {
-        type Abi;
-        unsafe fn convert(self) -> Self::Abi;
-    }
-
-    impl LibcallResult for () {
-        type Abi = ();
-        unsafe fn convert(self) {}
-    }
-
-    impl<T, E> LibcallResult for Result<T, E>
-    where
-        E: Into<TrapReason>,
-    {
-        type Abi = T;
-        unsafe fn convert(self) -> T {
-            match self {
-                Ok(t) => t,
-                Err(e) => crate::runtime::vm::traphandlers::raise_trap(e.into()),
-            }
-        }
-    }
-
-    impl LibcallResult for *mut u8 {
-        type Abi = *mut u8;
-        unsafe fn convert(self) -> *mut u8 {
-            self
-        }
-    }
-
-    impl LibcallResult for bool {
-        type Abi = u32;
-        unsafe fn convert(self) -> u32 {
-            self as u32
-        }
-    }
 }
 
 fn memory32_grow(
@@ -197,18 +155,52 @@ fn memory32_grow(
     instance: &mut Instance,
     delta: u64,
     memory_index: u32,
-) -> Result<*mut u8, TrapReason> {
+) -> Result<Option<AllocationSize>, TrapReason> {
     let memory_index = MemoryIndex::from_u32(memory_index);
-    let result = match instance
-        .memory_grow(store, memory_index, delta)
-        .map_err(|error| TrapReason::User {
-            error,
-            needs_backtrace: true,
-        })? {
-        Some(size_in_bytes) => size_in_bytes / instance.memory_page_size(memory_index),
-        None => usize::max_value(),
-    };
-    Ok(result as *mut _)
+    let result = instance
+        .memory_grow(store, memory_index, delta)?
+        .map(|size_in_bytes| {
+            AllocationSize(size_in_bytes / instance.memory_page_size(memory_index))
+        });
+
+    Ok(result)
+}
+
+/// A helper structure to represent the return value of a memory or table growth
+/// call.
+///
+/// This represents a byte or element-based count of the size of an item on the
+/// host. For example a memory is how many bytes large the memory is, or a table
+/// is how many elements large it is. It's assumed that the value here is never
+/// -1 or -2 as that would mean the entire host address space is allocated which
+/// is not possible.
+struct AllocationSize(usize);
+
+/// Special implementation for growth-related libcalls.
+///
+/// Here the optional return value means:
+///
+/// * `Some(val)` - the growth succeeded and the previous size of the item was
+///   `val`.
+/// * `None` - the growth failed.
+///
+/// The failure case returns -1 (or `usize::MAX` as an unsigned integer) and the
+/// successful case returns the `val` itself. Note that -2 (`usize::MAX - 1`
+/// when unsigned) is unwind as a sentinel to indicate an unwind as no valid
+/// allocation can be that large.
+unsafe impl HostResultHasUnwindSentinel for Option<AllocationSize> {
+    type Abi = *mut u8;
+    const SENTINEL: *mut u8 = (usize::MAX - 1) as *mut u8;
+
+    fn into_abi(self) -> *mut u8 {
+        match self {
+            Some(size) => {
+                debug_assert!(size.0 < (usize::MAX - 1));
+                size.0 as *mut u8
+            }
+            None => usize::MAX as *mut u8,
+        }
+    }
 }
 
 /// Implementation of `table.grow` for `funcref` tables.
@@ -218,19 +210,18 @@ unsafe fn table_grow_func_ref(
     table_index: u32,
     delta: u64,
     init_value: *mut u8,
-) -> Result<*mut u8> {
+) -> Result<Option<AllocationSize>> {
     let table_index = TableIndex::from_u32(table_index);
 
     let element = match instance.table_element_type(table_index) {
-        TableElementType::Func => (init_value as *mut VMFuncRef).into(),
+        TableElementType::Func => NonNull::new(init_value.cast::<VMFuncRef>()).into(),
         TableElementType::GcRef => unreachable!(),
     };
 
-    let result = match instance.table_grow(store, table_index, delta, element)? {
-        Some(r) => r,
-        None => usize::MAX,
-    };
-    Ok(result as *mut _)
+    let result = instance
+        .table_grow(store, table_index, delta, element)?
+        .map(AllocationSize);
+    Ok(result)
 }
 
 /// Implementation of `table.grow` for GC-reference tables.
@@ -241,7 +232,7 @@ unsafe fn table_grow_gc_ref(
     table_index: u32,
     delta: u64,
     init_value: u32,
-) -> Result<*mut u8> {
+) -> Result<Option<AllocationSize>> {
     let table_index = TableIndex::from_u32(table_index);
 
     let element = match instance.table_element_type(table_index) {
@@ -256,11 +247,10 @@ unsafe fn table_grow_gc_ref(
             .into(),
     };
 
-    let result = match instance.table_grow(store, table_index, delta, element)? {
-        Some(r) => r,
-        None => usize::MAX,
-    };
-    Ok(result as *mut _)
+    let result = instance
+        .table_grow(store, table_index, delta, element)?
+        .map(AllocationSize);
+    Ok(result)
 }
 
 /// Implementation of `table.fill` for `funcref`s.
@@ -276,10 +266,8 @@ unsafe fn table_fill_func_ref(
     let table = &mut *instance.get_table(table_index);
     match table.element_type() {
         TableElementType::Func => {
-            let val = val.cast::<VMFuncRef>();
-            table
-                .fill(store.optional_gc_store_mut()?, dst, val.into(), len)
-                .err2anyhow()?;
+            let val = NonNull::new(val.cast::<VMFuncRef>());
+            table.fill(store.optional_gc_store_mut()?, dst, val.into(), len)?;
             Ok(())
         }
         TableElementType::GcRef => unreachable!(),
@@ -303,9 +291,7 @@ unsafe fn table_fill_gc_ref(
             let gc_store = store.store_opaque_mut().unwrap_gc_store_mut();
             let gc_ref = VMGcRef::from_raw_u32(val);
             let gc_ref = gc_ref.map(|r| gc_store.clone_gc_ref(&r));
-            table
-                .fill(Some(gc_store), dst, gc_ref.into(), len)
-                .err2anyhow()?;
+            table.fill(Some(gc_store), dst, gc_ref.into(), len)?;
             Ok(())
         }
     }
@@ -329,7 +315,7 @@ unsafe fn table_copy(
     let src_range = src..(src.checked_add(len).unwrap_or(u64::MAX));
     let src_table = instance.get_table_with_lazy_init(src_table_index, src_range);
     let gc_store = store.optional_gc_store_mut()?;
-    Table::copy(gc_store, dst_table, src_table, dst, src, len).err2anyhow()?;
+    Table::copy(gc_store, dst_table, src_table, dst, src, len)?;
     Ok(())
 }
 
@@ -406,7 +392,7 @@ fn memory_init(
 }
 
 // Implementation of `ref.func`.
-fn ref_func(_store: &mut dyn VMStore, instance: &mut Instance, func_index: u32) -> *mut u8 {
+fn ref_func(_store: &mut dyn VMStore, instance: &mut Instance, func_index: u32) -> NonNull<u8> {
     instance
         .get_func_ref(FuncIndex::from_u32(func_index))
         .expect("ref_func: funcref should always be available for given func index")
@@ -432,7 +418,10 @@ unsafe fn table_get_lazy_init_func_ref(
         .get(None, index)
         .expect("table access already bounds-checked");
 
-    elem.into_func_ref_asserting_initialized().cast()
+    match elem.into_func_ref_asserting_initialized() {
+        Some(ptr) => ptr.as_ptr().cast(),
+        None => core::ptr::null_mut(),
+    }
 }
 
 /// Drop a GC reference.
@@ -533,8 +522,7 @@ unsafe fn gc_alloc_raw(
             store
                 .unwrap_gc_store_mut()
                 .alloc_raw(header, layout)?
-                .ok_or_else(|| GcHeapOutOfMemory::new(()))
-                .err2anyhow()?
+                .ok_or_else(|| GcHeapOutOfMemory::new(()))?
         }
     };
 
@@ -627,15 +615,15 @@ unsafe fn array_new_data(
     let byte_len = len
         .checked_mul(one_elem_size)
         .and_then(|x| usize::try_from(x).ok())
-        .ok_or_else(|| Trap::MemoryOutOfBounds.into_anyhow())?;
+        .ok_or_else(|| Trap::MemoryOutOfBounds)?;
 
     // Get the data from the segment, checking bounds.
-    let src = usize::try_from(src).map_err(|_| Trap::MemoryOutOfBounds.into_anyhow())?;
+    let src = usize::try_from(src).map_err(|_| Trap::MemoryOutOfBounds)?;
     let data = instance
         .wasm_data(data_range)
         .get(src..)
         .and_then(|d| d.get(..byte_len))
-        .ok_or_else(|| Trap::MemoryOutOfBounds.into_anyhow())?;
+        .ok_or_else(|| Trap::MemoryOutOfBounds)?;
 
     // Allocate the (uninitialized) array.
     let gc_layout = store
@@ -659,7 +647,7 @@ unsafe fn array_new_data(
                 .store_opaque_mut()
                 .unwrap_gc_store_mut()
                 .alloc_uninit_array(shared_ty, u32::try_from(byte_len).unwrap(), &array_layout)?
-                .ok_or_else(|| GcHeapOutOfMemory::new(()).into_anyhow())?
+                .ok_or_else(|| GcHeapOutOfMemory::new(()))?
         }
     };
 
@@ -702,24 +690,20 @@ unsafe fn array_init_data(
     );
 
     // Null check the array.
-    let gc_ref = VMGcRef::from_raw_u32(array).ok_or_else(|| Trap::NullReference.into_anyhow())?;
+    let gc_ref = VMGcRef::from_raw_u32(array).ok_or_else(|| Trap::NullReference)?;
     let array = gc_ref
         .into_arrayref(&*store.unwrap_gc_store().gc_heap)
         .expect("gc ref should be an array");
 
-    let dst = usize::try_from(dst).map_err(|_| Trap::MemoryOutOfBounds.into_anyhow())?;
-    let src = usize::try_from(src).map_err(|_| Trap::MemoryOutOfBounds.into_anyhow())?;
-    let len = usize::try_from(len).map_err(|_| Trap::MemoryOutOfBounds.into_anyhow())?;
+    let dst = usize::try_from(dst).map_err(|_| Trap::MemoryOutOfBounds)?;
+    let src = usize::try_from(src).map_err(|_| Trap::MemoryOutOfBounds)?;
+    let len = usize::try_from(len).map_err(|_| Trap::MemoryOutOfBounds)?;
 
     // Bounds check the array.
     let array_len = array.len(store.store_opaque());
-    let array_len = usize::try_from(array_len).map_err(|_| Trap::ArrayOutOfBounds.into_anyhow())?;
-    if dst
-        .checked_add(len)
-        .ok_or_else(|| Trap::ArrayOutOfBounds.into_anyhow())?
-        > array_len
-    {
-        return Err(Trap::ArrayOutOfBounds.into_anyhow());
+    let array_len = usize::try_from(array_len).map_err(|_| Trap::ArrayOutOfBounds)?;
+    if dst.checked_add(len).ok_or_else(|| Trap::ArrayOutOfBounds)? > array_len {
+        return Err(Trap::ArrayOutOfBounds.into());
     }
 
     // Calculate the byte length from the array length.
@@ -731,7 +715,7 @@ unsafe fn array_init_data(
         .expect("Wasm validation ensures that this type have a defined byte size");
     let data_len = len
         .checked_mul(usize::try_from(one_elem_size).unwrap())
-        .ok_or_else(|| Trap::MemoryOutOfBounds.into_anyhow())?;
+        .ok_or_else(|| Trap::MemoryOutOfBounds)?;
 
     // Get the data from the segment, checking its bounds.
     let data_range = instance.wasm_data_range(data_index);
@@ -739,7 +723,7 @@ unsafe fn array_init_data(
         .wasm_data(data_range)
         .get(src..)
         .and_then(|d| d.get(..data_len))
-        .ok_or_else(|| Trap::MemoryOutOfBounds.into_anyhow())?;
+        .ok_or_else(|| Trap::MemoryOutOfBounds)?;
 
     // Copy the data into the array.
 
@@ -788,8 +772,8 @@ unsafe fn array_new_elem(
     let mut storage = None;
     let elements = instance.passive_element_segment(&mut storage, elem_index);
 
-    let src = usize::try_from(src).map_err(|_| Trap::TableOutOfBounds.into_anyhow())?;
-    let len = usize::try_from(len).map_err(|_| Trap::TableOutOfBounds.into_anyhow())?;
+    let src = usize::try_from(src).map_err(|_| Trap::TableOutOfBounds)?;
+    let len = usize::try_from(len).map_err(|_| Trap::TableOutOfBounds)?;
 
     let shared_ty = instance.engine_type_index(array_type_index);
     let array_ty = ArrayType::from_shared_type_index(store.engine(), shared_ty);
@@ -804,12 +788,11 @@ unsafe fn array_new_elem(
                 vals.extend(
                     fs.get(src..)
                         .and_then(|s| s.get(..len))
-                        .ok_or_else(|| Trap::TableOutOfBounds.into_anyhow())?
+                        .ok_or_else(|| Trap::TableOutOfBounds)?
                         .iter()
                         .map(|f| {
-                            let raw_func_ref =
-                                instance.get_func_ref(*f).unwrap_or(core::ptr::null_mut());
-                            let func = Func::from_vm_func_ref(store, raw_func_ref);
+                            let raw_func_ref = instance.get_func_ref(*f);
+                            let func = raw_func_ref.map(|p| Func::from_vm_func_ref(store, p));
                             Val::FuncRef(func)
                         }),
                 );
@@ -818,7 +801,7 @@ unsafe fn array_new_elem(
                 let xs = xs
                     .get(src..)
                     .and_then(|s| s.get(..len))
-                    .ok_or_else(|| Trap::TableOutOfBounds.into_anyhow())?;
+                    .ok_or_else(|| Trap::TableOutOfBounds)?;
 
                 let mut const_context = ConstEvalContext::new(instance);
                 let mut const_evaluator = ConstExprEvaluator::default();
@@ -881,7 +864,7 @@ unsafe fn array_init_elem(
         );
 
     // Convert the raw GC ref into a `Rooted<ArrayRef>`.
-    let array = VMGcRef::from_raw_u32(array).ok_or_else(|| Trap::NullReference.into_anyhow())?;
+    let array = VMGcRef::from_raw_u32(array).ok_or_else(|| Trap::NullReference)?;
     let array = store.unwrap_gc_store_mut().clone_gc_ref(&array);
     let array = {
         let mut no_gc = AutoAssertNoGc::new(&mut store);
@@ -891,12 +874,8 @@ unsafe fn array_init_elem(
     // Bounds check the destination within the array.
     let array_len = array._len(&store)?;
     log::trace!("array_len = {array_len}");
-    if dst
-        .checked_add(len)
-        .ok_or_else(|| Trap::ArrayOutOfBounds.into_anyhow())?
-        > array_len
-    {
-        return Err(Trap::ArrayOutOfBounds.into_anyhow());
+    if dst.checked_add(len).ok_or_else(|| Trap::ArrayOutOfBounds)? > array_len {
+        return Err(Trap::ArrayOutOfBounds.into());
     }
 
     // Get the passive element segment.
@@ -904,19 +883,19 @@ unsafe fn array_init_elem(
     let elements = instance.passive_element_segment(&mut storage, elem_index);
 
     // Convert array offsets into `usize`s.
-    let src = usize::try_from(src).map_err(|_| Trap::TableOutOfBounds.into_anyhow())?;
-    let len = usize::try_from(len).map_err(|_| Trap::TableOutOfBounds.into_anyhow())?;
+    let src = usize::try_from(src).map_err(|_| Trap::TableOutOfBounds)?;
+    let len = usize::try_from(len).map_err(|_| Trap::TableOutOfBounds)?;
 
     // Turn the elements into `Val`s.
     let vals = match elements {
         TableSegmentElements::Functions(fs) => fs
             .get(src..)
             .and_then(|s| s.get(..len))
-            .ok_or_else(|| Trap::TableOutOfBounds.into_anyhow())?
+            .ok_or_else(|| Trap::TableOutOfBounds)?
             .iter()
             .map(|f| {
-                let raw_func_ref = instance.get_func_ref(*f).unwrap_or(core::ptr::null_mut());
-                let func = Func::from_vm_func_ref(&mut store, raw_func_ref);
+                let raw_func_ref = instance.get_func_ref(*f);
+                let func = raw_func_ref.map(|p| Func::from_vm_func_ref(&mut store, p));
                 Val::FuncRef(func)
             })
             .collect::<Vec<_>>(),
@@ -929,7 +908,7 @@ unsafe fn array_init_elem(
 
             xs.get(src..)
                 .and_then(|s| s.get(..len))
-                .ok_or_else(|| Trap::TableOutOfBounds.into_anyhow())?
+                .ok_or_else(|| Trap::TableOutOfBounds)?
                 .iter()
                 .map(|x| unsafe {
                     let raw = const_evaluator
@@ -976,33 +955,23 @@ unsafe fn array_copy(
     let mut store = AutoAssertNoGc::new(&mut store);
 
     // Convert the raw GC refs into `Rooted<ArrayRef>`s.
-    let dst_array =
-        VMGcRef::from_raw_u32(dst_array).ok_or_else(|| Trap::NullReference.into_anyhow())?;
+    let dst_array = VMGcRef::from_raw_u32(dst_array).ok_or_else(|| Trap::NullReference)?;
     let dst_array = store.unwrap_gc_store_mut().clone_gc_ref(&dst_array);
     let dst_array = ArrayRef::from_cloned_gc_ref(&mut store, dst_array);
-    let src_array =
-        VMGcRef::from_raw_u32(src_array).ok_or_else(|| Trap::NullReference.into_anyhow())?;
+    let src_array = VMGcRef::from_raw_u32(src_array).ok_or_else(|| Trap::NullReference)?;
     let src_array = store.unwrap_gc_store_mut().clone_gc_ref(&src_array);
     let src_array = ArrayRef::from_cloned_gc_ref(&mut store, src_array);
 
     // Bounds check the destination array's elements.
     let dst_array_len = dst_array._len(&store)?;
-    if dst
-        .checked_add(len)
-        .ok_or_else(|| Trap::ArrayOutOfBounds.into_anyhow())?
-        > dst_array_len
-    {
-        return Err(Trap::ArrayOutOfBounds.into_anyhow());
+    if dst.checked_add(len).ok_or_else(|| Trap::ArrayOutOfBounds)? > dst_array_len {
+        return Err(Trap::ArrayOutOfBounds.into());
     }
 
     // Bounds check the source array's elements.
     let src_array_len = src_array._len(&store)?;
-    if src
-        .checked_add(len)
-        .ok_or_else(|| Trap::ArrayOutOfBounds.into_anyhow())?
-        > src_array_len
-    {
-        return Err(Trap::ArrayOutOfBounds.into_anyhow());
+    if src.checked_add(len).ok_or_else(|| Trap::ArrayOutOfBounds)? > src_array_len {
+        return Err(Trap::ArrayOutOfBounds.into());
     }
 
     let mut store = AutoAssertNoGc::new(&mut store);
@@ -1033,7 +1002,7 @@ unsafe fn is_subtype(
     _instance: &mut Instance,
     actual_engine_type: u32,
     expected_engine_type: u32,
-) -> bool {
+) -> u32 {
     use wasmtime_environ::VMSharedTypeIndex;
 
     let actual = VMSharedTypeIndex::from_u32(actual_engine_type);
@@ -1046,7 +1015,7 @@ unsafe fn is_subtype(
         .into();
 
     log::trace!("is_subtype(actual={actual:?}, expected={expected:?}) -> {is_subtype}",);
-    is_subtype
+    is_subtype as u32
 }
 
 // Implementation of `memory.atomic.notify` for locally defined memories.
@@ -1104,8 +1073,18 @@ fn out_of_gas(store: &mut dyn VMStore, _instance: &mut Instance) -> Result<()> {
 }
 
 // Hook for when an instance observes that the epoch has changed.
-fn new_epoch(store: &mut dyn VMStore, _instance: &mut Instance) -> Result<u64> {
-    store.new_epoch()
+fn new_epoch(store: &mut dyn VMStore, _instance: &mut Instance) -> Result<NextEpoch> {
+    store.new_epoch().map(NextEpoch)
+}
+
+struct NextEpoch(u64);
+
+unsafe impl HostResultHasUnwindSentinel for NextEpoch {
+    type Abi = u64;
+    const SENTINEL: u64 = u64::MAX;
+    fn into_abi(self) -> u64 {
+        self.0
+    }
 }
 
 // Hook for validating malloc using wmemcheck_state.
@@ -1115,14 +1094,12 @@ unsafe fn check_malloc(
     instance: &mut Instance,
     addr: u32,
     len: u32,
-) -> Result<u32> {
+) -> Result<()> {
     if let Some(wmemcheck_state) = &mut instance.wmemcheck_state {
         let result = wmemcheck_state.malloc(addr as usize, len as usize);
         wmemcheck_state.memcheck_on();
         match result {
-            Ok(()) => {
-                return Ok(0);
-            }
+            Ok(()) => {}
             Err(DoubleMalloc { addr, len }) => {
                 bail!("Double malloc at addr {:#x} of size {}", addr, len)
             }
@@ -1134,19 +1111,17 @@ unsafe fn check_malloc(
             }
         }
     }
-    Ok(0)
+    Ok(())
 }
 
 // Hook for validating free using wmemcheck_state.
 #[cfg(feature = "wmemcheck")]
-unsafe fn check_free(_store: &mut dyn VMStore, instance: &mut Instance, addr: u32) -> Result<u32> {
+unsafe fn check_free(_store: &mut dyn VMStore, instance: &mut Instance, addr: u32) -> Result<()> {
     if let Some(wmemcheck_state) = &mut instance.wmemcheck_state {
         let result = wmemcheck_state.free(addr as usize);
         wmemcheck_state.memcheck_on();
         match result {
-            Ok(()) => {
-                return Ok(0);
-            }
+            Ok(()) => {}
             Err(InvalidFree { addr }) => {
                 bail!("Invalid free at addr {:#x}", addr)
             }
@@ -1155,7 +1130,7 @@ unsafe fn check_free(_store: &mut dyn VMStore, instance: &mut Instance, addr: u3
             }
         }
     }
-    Ok(0)
+    Ok(())
 }
 
 // Hook for validating load using wmemcheck_state.
@@ -1166,13 +1141,11 @@ fn check_load(
     num_bytes: u32,
     addr: u32,
     offset: u32,
-) -> Result<u32> {
+) -> Result<()> {
     if let Some(wmemcheck_state) = &mut instance.wmemcheck_state {
         let result = wmemcheck_state.read(addr as usize + offset as usize, num_bytes as usize);
         match result {
-            Ok(()) => {
-                return Ok(0);
-            }
+            Ok(()) => {}
             Err(InvalidRead { addr, len }) => {
                 bail!("Invalid load at addr {:#x} of size {}", addr, len);
             }
@@ -1184,7 +1157,7 @@ fn check_load(
             }
         }
     }
-    Ok(0)
+    Ok(())
 }
 
 // Hook for validating store using wmemcheck_state.
@@ -1195,13 +1168,11 @@ fn check_store(
     num_bytes: u32,
     addr: u32,
     offset: u32,
-) -> Result<u32> {
+) -> Result<()> {
     if let Some(wmemcheck_state) = &mut instance.wmemcheck_state {
         let result = wmemcheck_state.write(addr as usize + offset as usize, num_bytes as usize);
         match result {
-            Ok(()) => {
-                return Ok(0);
-            }
+            Ok(()) => {}
             Err(InvalidWrite { addr, len }) => {
                 bail!("Invalid store at addr {:#x} of size {}", addr, len)
             }
@@ -1213,7 +1184,7 @@ fn check_store(
             }
         }
     }
-    Ok(0)
+    Ok(())
 }
 
 // Hook for turning wmemcheck load/store validation off when entering a malloc function.
@@ -1253,74 +1224,26 @@ fn update_mem_size(_store: &mut dyn VMStore, instance: &mut Instance, num_pages:
     }
 }
 
-fn trap(_store: &mut dyn VMStore, _instance: &mut Instance, code: u8) -> Result<(), TrapReason> {
+/// This intrinsic is just used to record trap information.
+///
+/// The `Infallible` "ok" type here means that this never returns success, it
+/// only ever returns an error, and this hooks into the machinery to handle
+/// `Result` values to record such trap information.
+fn trap(
+    _store: &mut dyn VMStore,
+    _instance: &mut Instance,
+    code: u8,
+) -> Result<Infallible, TrapReason> {
     Err(TrapReason::Wasm(
         wasmtime_environ::Trap::from_u8(code).unwrap(),
     ))
 }
 
-fn f64_to_i64(
-    _store: &mut dyn VMStore,
-    _instance: &mut Instance,
-    val: f64,
-) -> Result<u64, TrapReason> {
-    if val.is_nan() {
-        return Err(TrapReason::Wasm(Trap::BadConversionToInteger));
-    }
-    let val = relocs::truncf64(val);
-    if val <= -9223372036854777856.0 || val >= 9223372036854775808.0 {
-        return Err(TrapReason::Wasm(Trap::IntegerOverflow));
-    }
-    #[allow(clippy::cast_possible_truncation)]
-    return Ok((val as i64).unsigned());
-}
-
-fn f64_to_u64(
-    _store: &mut dyn VMStore,
-    _instance: &mut Instance,
-    val: f64,
-) -> Result<u64, TrapReason> {
-    if val.is_nan() {
-        return Err(TrapReason::Wasm(Trap::BadConversionToInteger));
-    }
-    let val = relocs::truncf64(val);
-    if val <= -1.0 || val >= 18446744073709551616.0 {
-        return Err(TrapReason::Wasm(Trap::IntegerOverflow));
-    }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    return Ok(val as u64);
-}
-
-fn f64_to_i32(
-    _store: &mut dyn VMStore,
-    _instance: &mut Instance,
-    val: f64,
-) -> Result<u32, TrapReason> {
-    if val.is_nan() {
-        return Err(TrapReason::Wasm(Trap::BadConversionToInteger));
-    }
-    let val = relocs::truncf64(val);
-    if val <= -2147483649.0 || val >= 2147483648.0 {
-        return Err(TrapReason::Wasm(Trap::IntegerOverflow));
-    }
-    #[allow(clippy::cast_possible_truncation)]
-    return Ok((val as i32).unsigned());
-}
-
-fn f64_to_u32(
-    _store: &mut dyn VMStore,
-    _instance: &mut Instance,
-    val: f64,
-) -> Result<u32, TrapReason> {
-    if val.is_nan() {
-        return Err(TrapReason::Wasm(Trap::BadConversionToInteger));
-    }
-    let val = relocs::truncf64(val);
-    if val <= -1.0 || val >= 4294967296.0 {
-        return Err(TrapReason::Wasm(Trap::IntegerOverflow));
-    }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    return Ok(val as u32);
+fn raise(_store: &mut dyn VMStore, _instance: &mut Instance) {
+    // SAFETY: this is only called from compiled wasm so we know that wasm has
+    // already been entered. It's a dynamic safety precondition that the trap
+    // information has already been arranged to be present.
+    unsafe { crate::runtime::vm::traphandlers::raise_preexisting_trap() }
 }
 
 /// This module contains functions which are used for resolving relocations at

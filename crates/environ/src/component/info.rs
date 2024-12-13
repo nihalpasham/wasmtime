@@ -452,24 +452,35 @@ pub struct CanonicalOptions {
 }
 
 /// Possible encodings of strings within the component model.
-//
-// Note that the `repr(u8)` is load-bearing here since this is used in an
-// `extern "C" fn()` function argument which is called from cranelift-compiled
-// code so we must know the representation of this.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[allow(missing_docs)]
-#[repr(u8)]
+#[allow(missing_docs, reason = "self-describing variants")]
 pub enum StringEncoding {
     Utf8,
     Utf16,
     CompactUtf16,
 }
 
+impl StringEncoding {
+    /// Decodes the `u8` provided back into a `StringEncoding`, if it's valid.
+    pub fn from_u8(val: u8) -> Option<StringEncoding> {
+        if val == StringEncoding::Utf8 as u8 {
+            return Some(StringEncoding::Utf8);
+        }
+        if val == StringEncoding::Utf16 as u8 {
+            return Some(StringEncoding::Utf16);
+        }
+        if val == StringEncoding::CompactUtf16 as u8 {
+            return Some(StringEncoding::CompactUtf16);
+        }
+        None
+    }
+}
+
 /// Possible transcoding operations that must be provided by the host.
 ///
 /// Note that each transcoding operation may have a unique signature depending
 /// on the precise operation.
-#[allow(missing_docs)]
+#[allow(missing_docs, reason = "self-describing variants")]
 #[derive(Debug, Copy, Clone, Hash, Eq, PartialEq)]
 pub enum Transcode {
     Copy(FixedEncoding),
@@ -525,7 +536,7 @@ impl Transcode {
 }
 
 #[derive(Debug, Copy, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
-#[allow(missing_docs)]
+#[allow(missing_docs, reason = "self-describing variants")]
 pub enum FixedEncoding {
     Utf8,
     Utf16,
