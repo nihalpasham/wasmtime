@@ -133,9 +133,7 @@ impl AMode {
 
     pub(crate) fn get_offset_with_state(&self, state: &EmitState) -> i32 {
         match self {
-            &AMode::SlotOffset(offset) => {
-                offset + state.frame_layout().outgoing_args_size as i32
-            }
+            &AMode::SlotOffset(offset) => offset + state.frame_layout().outgoing_args_size as i32,
 
             // Compute the offset into the incoming argument area relative to SP
             &AMode::IncomingArg(offset) => {
@@ -311,7 +309,6 @@ impl IntegerCompare {
     }
 }
 
-
 impl AluOPRRR {
     pub(crate) const fn op_name(self) -> &'static str {
         match self {
@@ -325,7 +322,6 @@ impl AluOPRRR {
             Self::Sra => "sra",
             Self::Or => "or",
             Self::And => "and",
-            
         }
     }
 
@@ -334,16 +330,15 @@ impl AluOPRRR {
             AluOPRRR::Add => 0b000,
             AluOPRRR::Sll => 0b001,
             AluOPRRR::Slt => 0b010,
-            
+
             AluOPRRR::SltU => 0b011,
-            
+
             AluOPRRR::Xor => 0b100,
             AluOPRRR::Srl => 0b101,
             AluOPRRR::Sra => 0b101,
             AluOPRRR::Or => 0b110,
             AluOPRRR::And => 0b111,
             AluOPRRR::Sub => 0b000,
-
         }
     }
 
@@ -380,7 +375,6 @@ impl AluOPRRR {
     pub(crate) fn reverse_rs(self) -> bool {
         false
     }
-
 }
 
 impl AluOPRRI {
@@ -445,7 +439,6 @@ impl AluOPRRI {
             AluOPRRI::Slli => 0b001,
             AluOPRRI::Srli => 0b101,
             AluOPRRI::Srai => 0b101,
-            
         }
     }
 
@@ -477,7 +470,6 @@ impl LoadOP {
 
     pub(crate) fn from_type(ty: Type) -> Self {
         match ty {
-            
             I8 => Self::Lb,
             I16 => Self::Lh,
             I32 => Self::Lw,
@@ -495,10 +487,7 @@ impl LoadOP {
 
     pub(crate) fn op_code(self) -> u32 {
         match self {
-            Self::Lb | Self::Lh | Self::Lw | Self::Lbu | Self::Lhu => {
-                0b0000011
-            }
-            
+            Self::Lb | Self::Lh | Self::Lw | Self::Lbu | Self::Lhu => 0b0000011,
         }
     }
     pub(crate) fn funct3(self) -> u32 {

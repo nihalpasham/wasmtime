@@ -1374,11 +1374,9 @@ fn return_call_emit_impl<T>(
 ) {
     let sp_to_fp_offset = {
         let frame_layout = state.frame_layout();
-        (
-            frame_layout.clobber_size
-                + frame_layout.fixed_frame_storage_size
-                + frame_layout.outgoing_args_size
-        ) as i32
+        (frame_layout.clobber_size
+            + frame_layout.fixed_frame_storage_size
+            + frame_layout.outgoing_args_size) as i32
     };
 
     let mut clobber_offset = sp_to_fp_offset - 8;
@@ -1423,8 +1421,7 @@ fn return_call_emit_impl<T>(
 
     // If we over-allocated the incoming args area in the prologue, resize down to what the callee
     // is expecting.
-    let incoming_args_diff =
-        (state.frame_layout().tail_args_size - info.new_stack_arg_size) as i32;
+    let incoming_args_diff = (state.frame_layout().tail_args_size - info.new_stack_arg_size) as i32;
 
     // Increment SP all at once
     let sp_increment = sp_to_fp_offset + setup_area_size + incoming_args_diff;

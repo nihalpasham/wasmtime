@@ -303,16 +303,16 @@ impl Inst {
         // RV32I immediate minimum value: depends on the format.
         // For a 12-bit signed immediate (common in I-type, S-type, B-type):
         let _imm12_min = -(1 << 11); // -2048
-        // For a 20-bit signed immediate (used in U-type):
+                                     // For a 20-bit signed immediate (used in U-type):
         let imm20_min = -(1 << 19); // -524288
         imm20_min // Change to `imm12_min` if your focus is 12-bit immediates
     }
-    
+
     pub(crate) fn imm_max() -> i32 {
         // RV32I immediate maximum value: depends on the format.
         // For a 12-bit signed immediate (common in I-type, S-type, B-type):
         let _imm12_max = (1 << 11) - 1; // 2047
-        // For a 20-bit signed immediate (used in U-type):
+                                        // For a 20-bit signed immediate (used in U-type):
         let imm20_max = (1 << 19) - 1; // 524287
         imm20_max // Change to `imm12_max` if your focus is 12-bit immediates
     }
@@ -369,6 +369,6 @@ mod test {
     #[test]
     fn imm20_and_imm12() {
         assert!(Inst::imm_max() == (i32::MAX - 2048));
-        assert!(Inst::imm_min() == (i32::MIN - 2048));
+        assert!(Inst::imm_min() == (i32::MIN + 2048));
     }
 }

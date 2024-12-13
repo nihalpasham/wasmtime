@@ -8,17 +8,15 @@ use generated_code::MInst;
 // Types that the generated ISLE code uses via `use super::*`.
 use crate::isa;
 use crate::isa::riscv32::abi::Riscv32ABICallSite;
-use crate::isa::riscv32::lower::args::{
-    WritableXReg, XReg,
-};
+use crate::isa::riscv32::lower::args::{WritableXReg, XReg};
 use crate::isa::riscv32::Riscv32Backend;
 use crate::machinst::Reg;
 use crate::machinst::{isle::*, CallInfo, MachInst};
 use crate::machinst::{VCodeConstant, VCodeConstantData};
 use crate::{
     ir::{
-        immediates::*, types::*, BlockCall, ExternalName, Inst, InstructionData,
-        MemFlags, Opcode, TrapCode, Value, ValueList,
+        immediates::*, types::*, BlockCall, ExternalName, Inst, InstructionData, MemFlags, Opcode,
+        TrapCode, Value, ValueList,
     },
     isa::riscv32::inst::*,
     machinst::{ArgPair, InstOutput, IsTailCall},
@@ -62,7 +60,6 @@ impl generated_code::Context for RV32IsleContext<'_, '_, MInst, Riscv32Backend> 
     isle_lower_prelude_methods!();
     isle_prelude_caller_methods!(Riscv32ABICallSite);
 
-    
     fn xreg_new(&mut self, r: Reg) -> XReg {
         XReg::new(r).unwrap()
     }
@@ -320,7 +317,6 @@ impl generated_code::Context for RV32IsleContext<'_, '_, MInst, Riscv32Backend> 
         AMode::Const(c)
     }
 
-
     fn sinkable_inst(&mut self, val: Value) -> Option<Inst> {
         self.is_sinkable_inst(val)
     }
@@ -383,8 +379,6 @@ impl generated_code::Context for RV32IsleContext<'_, '_, MInst, Riscv32Backend> 
     fn int_compare_decompose(&mut self, cmp: IntegerCompare) -> (IntCC, XReg, XReg) {
         (cmp.kind, self.xreg_new(cmp.rs1), self.xreg_new(cmp.rs2))
     }
-
-   
 }
 
 /// The main entry point for lowering with ISLE.

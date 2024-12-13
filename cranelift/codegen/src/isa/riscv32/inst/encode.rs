@@ -87,8 +87,6 @@ pub fn encode_s_type(opcode: u32, width: u32, base: Reg, src: Reg, offset: Imm12
     bits
 }
 
-
-
 // The CSR Reg instruction is really just an I type instruction with the CSR in
 // the immediate field.
 pub fn encode_csr_reg(op: CsrRegOP, rd: WritableReg, rs: Reg, csr: CSR) -> u32 {
@@ -106,5 +104,3 @@ pub fn encode_csr_imm(op: CsrImmOP, rd: WritableReg, csr: CSR, imm: UImm5) -> u3
         csr.bits().bits(),
     )
 }
-
-

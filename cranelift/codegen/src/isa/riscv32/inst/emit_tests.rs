@@ -46,10 +46,6 @@ fn test_riscv32_binemit() {
 
     insns.push(TestUnit::new(Inst::Ret {}, "ret", 0x00008067));
 
-    
-
-    
-
     //
     insns.push(TestUnit::new(
         Inst::AluRRR {
@@ -130,7 +126,6 @@ fn test_riscv32_binemit() {
         0x645a503,
     ));
 
-    
     insns.push(TestUnit::new(
         Inst::Store {
             to: AMode::SPOffset(100),
@@ -161,7 +156,7 @@ fn test_riscv32_binemit() {
         "sw a0,100(sp)",
         0x6a12223,
     ));
-    
+
     insns.push(TestUnit::new(
         Inst::AluRRImm12 {
             alu_op: AluOPRRI::Addi,
@@ -242,7 +237,7 @@ fn test_riscv32_binemit() {
         "srai a0,a0,5",
         0x40555513,
     ));
-    
+
     insns.push(TestUnit::new(
         Inst::AluRRR {
             alu_op: AluOPRRR::Add,
@@ -344,7 +339,7 @@ fn test_riscv32_binemit() {
         "and a0,a0,a1",
         0xb57533,
     ));
-    
+
     let (flags, isa_flags) = make_test_flags();
     let emit_info = EmitInfo::new(flags, isa_flags);
 
@@ -370,4 +365,3 @@ fn make_test_flags() -> (settings::Flags, super::super::riscv_settings::Flags) {
     let isa_flags = super::super::riscv_settings::Flags::new(&flags, &b2);
     (flags, isa_flags)
 }
-

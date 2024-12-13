@@ -602,7 +602,7 @@ impl ABIMachineSpec for Riscv32MachineDeps {
         match rc {
             RegClass::Int => 1,
             RegClass::Float => 1,
-            RegClass::Vector => unimplemented!()
+            RegClass::Vector => unimplemented!(),
         }
     }
 

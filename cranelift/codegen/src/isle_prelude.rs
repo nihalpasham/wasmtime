@@ -211,7 +211,7 @@ macro_rules! isle_common_prelude_methods {
             let shift_amt = std::cmp::max(0, 32 - ty.bits());
             ((x as i32) << shift_amt) >> shift_amt
         }
-        
+
         #[inline]
         fn i64_sextend_u64(&mut self, ty: Type, x: u64) -> i64 {
             let shift_amt = std::cmp::max(0, 64 - ty.bits());
