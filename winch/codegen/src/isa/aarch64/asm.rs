@@ -2,7 +2,9 @@
 
 use super::{address::Address, regs};
 use crate::aarch64::regs::zero;
-use crate::masm::{DivKind, ExtendKind, FloatCmpKind, IntCmpKind, RoundingMode, ShiftKind};
+use crate::masm::{
+    DivKind, ExtendKind, FloatCmpKind, IntCmpKind, RemKind, RoundingMode, ShiftKind,
+};
 use crate::CallingConvention;
 use crate::{
     masm::OperandSize,
@@ -17,8 +19,8 @@ use cranelift_codegen::{
         ALUOp, ALUOp3, AMode, BitOp, BranchTarget, Cond, CondBrKind, ExtendOp, FPULeftShiftImm,
         FPUOp1, FPUOp2,
         FPUOpRI::{self, UShr32, UShr64},
-        FPUOpRIMod, FPURightShiftImm, FpuRoundMode, FpuToIntOp, Imm12, ImmLogic, ImmShift, Inst,
-        IntToFpuOp, PairAMode, ScalarSize, VecLanesOp, VecMisc2, VectorSize,
+        FPUOpRIMod, FPURightShiftImm, FpuRoundMode, Imm12, ImmLogic, ImmShift, Inst, IntToFpuOp,
+        PairAMode, ScalarSize, VecLanesOp, VecMisc2, VectorSize,
     },
     settings, Final, MachBuffer, MachBufferFinalized, MachInst, MachInstEmit, MachInstEmitState,
     MachLabel, Writable,
@@ -202,7 +204,7 @@ impl Assembler {
         self.ldr(addr, rd, size, false);
     }
 
-    /// Load a register.
+    /// Load address into a register.
     fn ldr(&mut self, addr: Address, rd: WritableReg, size: OperandSize, signed: bool) {
         use OperandSize::*;
         let writable_reg = rd.map(Into::into);
@@ -407,23 +409,21 @@ impl Assembler {
         kind: DivKind,
         size: OperandSize,
     ) {
-        // Check for division by 0
-        self.emit(Inst::TrapIf {
-            kind: CondBrKind::Zero(divisor.into()),
-            trap_code: TrapCode::INTEGER_DIVISION_BY_ZERO,
-        });
+        // Check for division by 0.
+        self.trapz(divisor, TrapCode::INTEGER_DIVISION_BY_ZERO);
 
         // check for overflow
         if kind == DivKind::Signed {
-            // we first check whether the divisor is -1
-            self.emit(Inst::AluRRImm12 {
-                alu_op: ALUOp::AddS,
-                size: size.into(),
-                rd: writable!(zero().into()),
-                rn: divisor.into(),
-                imm12: Imm12::maybe_from_u64(1).expect("1 fits in 12 bits"),
-            });
-            // if it is -1, then we check if the dividend is MIN
+            // Check for divisor overflow.
+            self.emit_alu_rri(
+                ALUOp::AddS,
+                Imm12::maybe_from_u64(1).expect("1 to fit in 12 bits"),
+                divisor,
+                writable!(zero()),
+                size,
+            );
+
+            // Check if the dividend is 1.
             self.emit(Inst::CCmpImm {
                 size: size.into(),
                 rn: dividend.into(),
@@ -432,31 +432,22 @@ impl Assembler {
                 cond: Cond::Eq,
             });
 
-            // Finally, trap if the previous operation overflowed
-            self.emit(Inst::TrapIf {
-                kind: CondBrKind::Cond(Cond::Vs),
-                trap_code: TrapCode::INTEGER_OVERFLOW,
-            })
+            // Finally, trap if the previous operation overflowed.
+            self.trapif(Cond::Vs, TrapCode::INTEGER_OVERFLOW);
         }
 
         // `cranelift-codegen` doesn't support emitting u/sdiv for anything but I64,
         // we therefore sign-extend the operand.
         // see: https://github.com/bytecodealliance/wasmtime/issues/9766
         if size == OperandSize::S32 {
-            self.emit(Inst::Extend {
-                rd: writable!(divisor.into()),
-                rn: divisor.into(),
-                signed: true,
-                from_bits: 32,
-                to_bits: 64,
-            });
-            self.emit(Inst::Extend {
-                rd: writable!(dividend.into()),
-                rn: dividend.into(),
-                signed: true,
-                from_bits: 32,
-                to_bits: 64,
-            });
+            let extend_kind = if kind == DivKind::Signed {
+                ExtendKind::I64Extend32S
+            } else {
+                ExtendKind::I64ExtendI32U
+            };
+
+            self.extend(divisor, writable!(divisor), extend_kind);
+            self.extend(dividend, writable!(dividend), extend_kind);
         }
 
         let op = match kind {
@@ -469,6 +460,56 @@ impl Assembler {
             divisor,
             dividend,
             dest.map(Into::into),
+            OperandSize::S64,
+        );
+    }
+
+    /// Signed/unsigned remainder operation with three registers.
+    pub fn rem_rrr(
+        &mut self,
+        divisor: Reg,
+        dividend: Reg,
+        dest: Writable<Reg>,
+        kind: RemKind,
+        size: OperandSize,
+    ) {
+        // Check for division by 0
+        self.trapz(divisor, TrapCode::INTEGER_DIVISION_BY_ZERO);
+
+        // `cranelift-codegen` doesn't support emitting u/sdiv for anything but I64,
+        // we therefore sign-extend the operand.
+        // see: https://github.com/bytecodealliance/wasmtime/issues/9766
+        if size == OperandSize::S32 {
+            let extend_kind = if kind.is_signed() {
+                ExtendKind::I64Extend32S
+            } else {
+                ExtendKind::I64ExtendI32U
+            };
+
+            self.extend(divisor, writable!(divisor), extend_kind);
+            self.extend(dividend, writable!(dividend), extend_kind);
+        }
+
+        let op = match kind {
+            RemKind::Signed => ALUOp::SDiv,
+            RemKind::Unsigned => ALUOp::UDiv,
+        };
+
+        let scratch = regs::scratch();
+        self.emit_alu_rrr(
+            op,
+            divisor,
+            dividend,
+            writable!(scratch.into()),
+            OperandSize::S64,
+        );
+
+        self.emit_alu_rrrr(
+            ALUOp3::MSub,
+            scratch,
+            divisor,
+            dest.map(Into::into),
+            dividend,
             OperandSize::S64,
         );
     }
@@ -676,27 +717,43 @@ impl Assembler {
         })
     }
 
-    /// Reinterpret a float as an integer.
-    pub fn fpu_to_int(&mut self, rn: Reg, rd: WritableReg, size: OperandSize) {
-        let op = match size {
-            OperandSize::S32 => FpuToIntOp::F32ToI32,
-            OperandSize::S64 => FpuToIntOp::F64ToI64,
-            OperandSize::S8 | OperandSize::S16 | OperandSize::S128 => unreachable!(),
+    /// Convert an signed integer to a float.
+    pub fn cvt_sint_to_float(
+        &mut self,
+        rn: Reg,
+        rd: WritableReg,
+        src_size: OperandSize,
+        dst_size: OperandSize,
+    ) {
+        let op = match (src_size, dst_size) {
+            (OperandSize::S32, OperandSize::S32) => IntToFpuOp::I32ToF32,
+            (OperandSize::S64, OperandSize::S32) => IntToFpuOp::I64ToF32,
+            (OperandSize::S32, OperandSize::S64) => IntToFpuOp::I32ToF64,
+            (OperandSize::S64, OperandSize::S64) => IntToFpuOp::I64ToF64,
+            _ => unreachable!(),
         };
 
-        self.emit(Inst::FpuToInt {
+        self.emit(Inst::IntToFpu {
             op,
             rd: rd.map(Into::into),
             rn: rn.into(),
         });
     }
 
-    /// Reinterpret an integer as a float.
-    pub fn int_to_fpu(&mut self, rn: Reg, rd: WritableReg, size: OperandSize) {
-        let op = match size {
-            OperandSize::S32 => IntToFpuOp::I32ToF32,
-            OperandSize::S64 => IntToFpuOp::I64ToF64,
-            OperandSize::S8 | OperandSize::S16 | OperandSize::S128 => unreachable!(),
+    /// Convert an unsigned integer to a float.
+    pub fn cvt_uint_to_float(
+        &mut self,
+        rn: Reg,
+        rd: WritableReg,
+        src_size: OperandSize,
+        dst_size: OperandSize,
+    ) {
+        let op = match (src_size, dst_size) {
+            (OperandSize::S32, OperandSize::S32) => IntToFpuOp::U32ToF32,
+            (OperandSize::S64, OperandSize::S32) => IntToFpuOp::U64ToF32,
+            (OperandSize::S32, OperandSize::S64) => IntToFpuOp::U32ToF64,
+            (OperandSize::S64, OperandSize::S64) => IntToFpuOp::U64ToF64,
+            _ => unreachable!(),
         };
 
         self.emit(Inst::IntToFpu {

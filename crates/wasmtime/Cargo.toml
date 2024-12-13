@@ -59,7 +59,7 @@ addr2line = { workspace = true, optional = true }
 semver = { workspace = true, optional = true }
 smallvec = { workspace = true, optional = true }
 hashbrown = { workspace = true, features = ["ahash"] }
-libm = "0.2.7"
+libm = { workspace = true }
 bitflags = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies.windows-sys]
@@ -315,6 +315,7 @@ std = [
   'object/std',
   'once_cell',
   'wasmtime-fiber?/std',
+  'pulley-interpreter?/std',
   # technically this isn't necessary but once you have the standard library you
   # probably want things to go fast in which case you've probably got signal
   # handlers and such so implicitly enable this. This also helps reduce the

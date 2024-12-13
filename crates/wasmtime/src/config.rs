@@ -1965,11 +1965,7 @@ impl Config {
                 // errors are panics though due to unimplemented bits in ABI
                 // code and those causes are listed here.
                 if self.compiler_target().is_pulley() {
-                    return WasmFeatures::SIMD
-                        | WasmFeatures::RELAXED_SIMD
-                        | WasmFeatures::TAIL_CALL
-                        | WasmFeatures::MEMORY64
-                        | WasmFeatures::GC_TYPES;
+                    return WasmFeatures::TAIL_CALL;
                 }
 
                 // Other Cranelift backends are either 100% missing or complete

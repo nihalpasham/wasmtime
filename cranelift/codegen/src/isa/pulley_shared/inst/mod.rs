@@ -44,7 +44,15 @@ mod generated {
 impl Inst {
     /// Generic constructor for a load (zero-extending where appropriate).
     pub fn gen_load(dst: Writable<Reg>, mem: Amode, ty: Type, flags: MemFlags) -> Inst {
-        if ty.is_int() {
+        if ty.is_vector() {
+            assert_eq!(ty.bytes(), 16);
+            Inst::VLoad {
+                dst: dst.map(|r| VReg::new(r).unwrap()),
+                mem,
+                ty,
+                flags,
+            }
+        } else if ty.is_int() {
             Inst::XLoad {
                 dst: dst.map(|r| XReg::new(r).unwrap()),
                 mem,
@@ -64,7 +72,15 @@ impl Inst {
 
     /// Generic constructor for a store.
     pub fn gen_store(mem: Amode, from_reg: Reg, ty: Type, flags: MemFlags) -> Inst {
-        if ty.is_int() {
+        if ty.is_vector() {
+            assert_eq!(ty.bytes(), 16);
+            Inst::VStore {
+                mem,
+                src: VReg::new(from_reg).unwrap(),
+                ty,
+                flags,
+            }
+        } else if ty.is_int() {
             Inst::XStore {
                 mem,
                 src: XReg::new(from_reg).unwrap(),
@@ -97,15 +113,8 @@ fn pulley_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
 
         Inst::Unwind { .. } | Inst::Nop => {}
 
-        Inst::TrapIf {
-            cond: _,
-            size: _,
-            src1,
-            src2,
-            code: _,
-        } => {
-            collector.reg_use(src1);
-            collector.reg_use(src2);
+        Inst::TrapIf { cond, code: _ } => {
+            cond.get_operands(collector);
         }
 
         Inst::GetSpecial { dst, reg } => {
@@ -149,51 +158,11 @@ fn pulley_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
         Inst::Jump { .. } => {}
 
         Inst::BrIf {
-            c,
+            cond,
             taken: _,
             not_taken: _,
         } => {
-            collector.reg_use(c);
-        }
-
-        Inst::BrIfXeq32 {
-            src1,
-            src2,
-            taken: _,
-            not_taken: _,
-        }
-        | Inst::BrIfXneq32 {
-            src1,
-            src2,
-            taken: _,
-            not_taken: _,
-        }
-        | Inst::BrIfXslt32 {
-            src1,
-            src2,
-            taken: _,
-            not_taken: _,
-        }
-        | Inst::BrIfXslteq32 {
-            src1,
-            src2,
-            taken: _,
-            not_taken: _,
-        }
-        | Inst::BrIfXult32 {
-            src1,
-            src2,
-            taken: _,
-            not_taken: _,
-        }
-        | Inst::BrIfXulteq32 {
-            src1,
-            src2,
-            taken: _,
-            not_taken: _,
-        } => {
-            collector.reg_use(src1);
-            collector.reg_use(src2);
+            cond.get_operands(collector);
         }
 
         Inst::LoadAddr { dst, mem } => {
@@ -233,6 +202,26 @@ fn pulley_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
         }
 
         Inst::FStore {
+            mem,
+            src,
+            ty: _,
+            flags: _,
+        } => {
+            mem.get_operands(collector);
+            collector.reg_use(src);
+        }
+
+        Inst::VLoad {
+            dst,
+            mem,
+            ty: _,
+            flags: _,
+        } => {
+            collector.reg_def(dst);
+            mem.get_operands(collector);
+        }
+
+        Inst::VStore {
             mem,
             src,
             ty: _,
@@ -342,7 +331,10 @@ where
         match self.inst {
             Inst::Raw {
                 raw: RawInst::Trap { .. },
-            } => true,
+            }
+            | Inst::Call { .. }
+            | Inst::IndirectCall { .. }
+            | Inst::IndirectCallHost { .. } => true,
             _ => false,
         }
     }
@@ -361,7 +353,7 @@ where
     }
 
     fn is_included_in_clobbers(&self) -> bool {
-        self.is_args()
+        !self.is_args()
     }
 
     fn is_trap(&self) -> bool {
@@ -387,13 +379,7 @@ where
             }
             | Inst::Rets { .. } => MachTerminator::Ret,
             Inst::Jump { .. } => MachTerminator::Uncond,
-            Inst::BrIf { .. }
-            | Inst::BrIfXeq32 { .. }
-            | Inst::BrIfXneq32 { .. }
-            | Inst::BrIfXslt32 { .. }
-            | Inst::BrIfXslteq32 { .. }
-            | Inst::BrIfXult32 { .. }
-            | Inst::BrIfXulteq32 { .. } => MachTerminator::Cond,
+            Inst::BrIf { .. } => MachTerminator::Cond,
             Inst::BrTable { .. } => MachTerminator::Indirect,
             _ => MachTerminator::None,
         }
@@ -572,16 +558,8 @@ impl Inst {
 
             Inst::Unwind { inst } => format!("unwind {inst:?}"),
 
-            Inst::TrapIf {
-                cond,
-                size,
-                src1,
-                src2,
-                code,
-            } => {
-                let src1 = format_reg(**src1);
-                let src2 = format_reg(**src2);
-                format!("trap_if {cond}, {size:?}, {src1}, {src2} // code = {code:?}")
+            Inst::TrapIf { cond, code } => {
+                format!("trap_{cond} // code = {code:?}")
             }
 
             Inst::Nop => format!("nop"),
@@ -613,87 +591,13 @@ impl Inst {
             Inst::Jump { label } => format!("jump {}", label.to_string()),
 
             Inst::BrIf {
-                c,
+                cond,
                 taken,
                 not_taken,
             } => {
-                let c = format_reg(**c);
                 let taken = taken.to_string();
                 let not_taken = not_taken.to_string();
-                format!("br_if {c}, {taken}; jump {not_taken}")
-            }
-
-            Inst::BrIfXeq32 {
-                src1,
-                src2,
-                taken,
-                not_taken,
-            } => {
-                let src1 = format_reg(**src1);
-                let src2 = format_reg(**src2);
-                let taken = taken.to_string();
-                let not_taken = not_taken.to_string();
-                format!("br_if_xeq32 {src1}, {src2}, {taken}; jump {not_taken}")
-            }
-            Inst::BrIfXneq32 {
-                src1,
-                src2,
-                taken,
-                not_taken,
-            } => {
-                let src1 = format_reg(**src1);
-                let src2 = format_reg(**src2);
-                let taken = taken.to_string();
-                let not_taken = not_taken.to_string();
-                format!("br_if_xneq32 {src1}, {src2}, {taken}; jump {not_taken}")
-            }
-            Inst::BrIfXslt32 {
-                src1,
-                src2,
-                taken,
-                not_taken,
-            } => {
-                let src1 = format_reg(**src1);
-                let src2 = format_reg(**src2);
-                let taken = taken.to_string();
-                let not_taken = not_taken.to_string();
-                format!("br_if_xslt32 {src1}, {src2}, {taken}; jump {not_taken}")
-            }
-            Inst::BrIfXslteq32 {
-                src1,
-                src2,
-                taken,
-                not_taken,
-            } => {
-                let src1 = format_reg(**src1);
-                let src2 = format_reg(**src2);
-                let taken = taken.to_string();
-                let not_taken = not_taken.to_string();
-                format!("br_if_xslteq32 {src1}, {src2}, {taken}; jump {not_taken}")
-            }
-            Inst::BrIfXult32 {
-                src1,
-                src2,
-                taken,
-                not_taken,
-            } => {
-                let src1 = format_reg(**src1);
-                let src2 = format_reg(**src2);
-                let taken = taken.to_string();
-                let not_taken = not_taken.to_string();
-                format!("br_if_xult32 {src1}, {src2}, {taken}; jump {not_taken}")
-            }
-            Inst::BrIfXulteq32 {
-                src1,
-                src2,
-                taken,
-                not_taken,
-            } => {
-                let src1 = format_reg(**src1);
-                let src2 = format_reg(**src2);
-                let taken = taken.to_string();
-                let not_taken = not_taken.to_string();
-                format!("br_if_xulteq32 {src1}, {src2}, {taken}; jump {not_taken}")
+                format!("br_{cond}, {taken}; jump {not_taken}")
             }
 
             Inst::LoadAddr { dst, mem } => {
@@ -750,6 +654,30 @@ impl Inst {
                 let mem = mem.to_string();
                 let src = format_reg(**src);
                 format!("fstore{ty} {mem}, {src} // flags = {flags}")
+            }
+
+            Inst::VLoad {
+                dst,
+                mem,
+                ty,
+                flags,
+            } => {
+                let dst = format_reg(*dst.to_reg());
+                let ty = ty.bits();
+                let mem = mem.to_string();
+                format!("{dst} = vload{ty} {mem} // flags ={flags}")
+            }
+
+            Inst::VStore {
+                mem,
+                src,
+                ty,
+                flags,
+            } => {
+                let ty = ty.bits();
+                let mem = mem.to_string();
+                let src = format_reg(**src);
+                format!("vstore{ty} {mem}, {src} // flags = {flags}")
             }
 
             Inst::BrTable {
