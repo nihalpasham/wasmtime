@@ -75,6 +75,8 @@ pub fn zero_reg() -> Reg {
 pub fn writable_zero_reg() -> Writable<Reg> {
     Writable::from_reg(zero_reg())
 }
+
+/// Get a reference to the stack pointer (x2).
 #[inline]
 pub fn stack_reg() -> Reg {
     x_reg(2)
@@ -83,7 +85,7 @@ pub fn stack_reg() -> Reg {
 /// Get a writable reference to the stack-pointer register.
 #[inline]
 pub fn writable_stack_reg() -> Writable<Reg> {
-    Writable::from_reg(stack_reg())
+    Writable::from_reg(stack_reg())  
 }
 
 /// Get a reference to the link register (x1).

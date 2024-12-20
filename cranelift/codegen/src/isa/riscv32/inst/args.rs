@@ -128,7 +128,7 @@ impl AMode {
             &AMode::SlotOffset(..) => Some(stack_reg()),
             &AMode::IncomingArg(..) => Some(stack_reg()),
             &AMode::Const(..) | AMode::Label(..) => None,
-        }
+        } 
     }
 
     pub(crate) fn get_offset_with_state(&self, state: &EmitState) -> i32 {

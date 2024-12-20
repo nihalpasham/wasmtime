@@ -107,7 +107,7 @@ pub enum Reloc {
     ///
     /// This is the `R_RISCV_PCREL_LO12_I` relocation from the RISC-V ELF psABI document.
     /// <https://github.com/riscv-non-isa/riscv-elf-psabi-doc/blob/master/riscv-elf.adoc#pc-relative-symbol-addresses>
-    RiscvPCRelLo12I,
+    RiscvPCRelLo12I,    
 
     /// High 20 bits of a 32-bit PC-relative GOT offset relocation
     ///
